@@ -1,0 +1,1 @@
+select * from get_user_chats_with_metadata(array['195f8012-5fa3-48f6-8027-0d79868d3f4a'::uuid]);

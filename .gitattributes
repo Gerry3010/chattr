@@ -1,0 +1,5 @@
+# Treat WebAssembly as binary to avoid huge diffs
+*.wasm binary
+
+# Worker bundle is large; disable textual diffs
+web/sqflite_sw.js -diff

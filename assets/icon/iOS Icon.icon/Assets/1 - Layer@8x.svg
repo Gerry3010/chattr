@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg width="1174" height="1174" viewBox="0 0 1174 1174" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="clip_path_1">
+      <rect width="1024" height="1024" />
+    </clipPath>
+    <path id="path_2" d="M0 0L1024 0L1024 1024L0 1024L0 0Z" />
+    <radialGradient id="gradient_3" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="1" gradientTransform="matrix(-196 -406 405.394 -195.708 196 905)">
+      <stop offset="0" stop-color="#435E81" />
+      <stop offset="1" stop-color="#000000" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="gradient_4" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="1" gradientTransform="matrix(-210 326 -326 -210 890 173)">
+      <stop offset="0" stop-color="#435E81" />
+      <stop offset="1" stop-color="#000000" stop-opacity="0" />
+    </radialGradient>
+    <filter color-interpolation-filters="sRGB" x="-1022" y="-1022" width="1024" height="1024" id="filter_5">
+      <feFlood flood-opacity="0" result="BackgroundImageFix_1" />
+      <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix_1" result="Shape_2" />
+      <feGaussianBlur stdDeviation="25" />
+    </filter>
+  </defs>
+  <g clip-path="url(#clip_path_1)" transform="translate(75 75)">
+    <rect width="1024" height="1024" fill="#FFFFFF" fill-rule="evenodd" />
+    <rect width="1024" height="1024" fill="#559CAD" fill-rule="evenodd" />
+    <g filter="url(#filter_5)">
+      <use p4:href="#path_2" fill="url(#gradient_3)" fill-rule="evenodd" xmlns:p4="http://www.w3.org/1999/xlink" />
+      <use p4:href="#path_2" fill="url(#gradient_4)" fill-rule="evenodd" xmlns:p4="http://www.w3.org/1999/xlink" />
+    </g>
+  </g>
+</svg>

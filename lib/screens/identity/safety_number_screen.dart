@@ -1,0 +1,309 @@
+// SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../features/identity/identity_verification_controller.dart';
+import '../../features/identity/identity_verification_repository.dart';
+import '../../features/profiles/profiles_controller.dart';
+
+/// Signal-style verification screen for one peer (audit C1): shows the shared
+/// 60-digit safety number, the current trust state, and lets the user mark the
+/// peer verified after an out-of-band comparison — or accept a changed key
+/// after a reinstall/recovery. Warn-only: nothing here ever blocks sending.
+class SafetyNumberScreen extends ConsumerWidget {
+  final String userId;
+  final String username;
+
+  const SafetyNumberScreen({
+    super.key,
+    required this.userId,
+    required this.username,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final stateAsync = ref.watch(peerVerificationProvider(userId));
+    final numberAsync = ref.watch(safetyNumberProvider(userId));
+    final state =
+        stateAsync.asData?.value ?? IdentityVerificationState.unknown;
+
+    return Scaffold(
+      appBar: AppBar(title: Text('identity.title'.tr())),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Flexible(
+                  child: Text(
+                    username,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context)
+                        .textTheme
+                        .headlineSmall
+                        ?.copyWith(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                _stateChip(context, state),
+              ],
+            ),
+            const SizedBox(height: 24),
+            if (state == IdentityVerificationState.changed) ...[
+              _changedWarning(context, ref),
+              const SizedBox(height: 24),
+            ],
+            numberAsync.when(
+              data: (number) => number == null
+                  ? _unknownInfo(context)
+                  : _numberCard(context, number),
+              loading: () =>
+                  const Center(child: CircularProgressIndicator()),
+              error: (e, _) =>
+                  Center(child: Text('common.error'.tr(args: ['$e']))),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'identity.explain'.tr(args: [username]),
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'identity.scan_hint'.tr(args: [username]),
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+            const SizedBox(height: 24),
+            if (state == IdentityVerificationState.unverified)
+              FilledButton.icon(
+                icon: const Icon(Icons.verified_user),
+                label: Text('identity.mark_verified'.tr()),
+                onPressed: () => _pinCurrentKey(
+                  context,
+                  ref,
+                  verified: true,
+                  snack: 'identity.verified_snack'.tr(args: [username]),
+                ),
+              ),
+            if (state == IdentityVerificationState.verified)
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.verified_user, color: Colors.green),
+                  const SizedBox(width: 8),
+                  Text(
+                    'identity.state_verified'.tr(),
+                    style: const TextStyle(
+                      color: Colors.green,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _numberCard(BuildContext context, String formatted) {
+    final groups = formatted.split(' ');
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        children: [
+          Text(
+            'identity.safety_number'.tr(),
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 16,
+            runSpacing: 8,
+            children: [
+              for (final g in groups)
+                Text(
+                  g,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 18,
+                    letterSpacing: 2,
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _unknownInfo(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.info_outline),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text('identity.unknown_explain'.tr(args: [username])),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _changedWarning(BuildContext context, WidgetRef ref) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.red[100],
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.gpp_bad, color: Colors.red[900]),
+              const SizedBox(width: 8),
+              Text(
+                'identity.changed_title'.tr(),
+                style: TextStyle(
+                  color: Colors.red[900],
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'identity.changed_explain'.tr(args: [username]),
+            style: TextStyle(color: Colors.red[900]),
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: () => _pinCurrentKey(
+                context,
+                ref,
+                verified: false,
+                snack: 'identity.accepted_snack'.tr(),
+              ),
+              child: Text(
+                'identity.accept_new_key'.tr(),
+                style: TextStyle(
+                  color: Colors.red[900],
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Pin the peer's CURRENT published identity key (mark-verified after an
+  /// out-of-band comparison, or accept-new-key after a change warning), then
+  /// refresh every provider that renders trust state.
+  Future<void> _pinCurrentKey(
+    BuildContext context,
+    WidgetRef ref, {
+    required bool verified,
+    required String snack,
+  }) async {
+    try {
+      final profile = await ref
+          .read(profilesControllerProvider.notifier)
+          .getProfile(userId);
+      final key = profile.identityPublicKey;
+      if (key == null || key.isEmpty) return;
+      await ref
+          .read(identityVerificationRepositoryProvider)
+          .pin(userId, key, verified: verified);
+      ref.invalidate(peerVerificationProvider(userId));
+      ref.invalidate(chatVerificationProvider);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(snack)));
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('common.error'.tr(args: ['$e'])),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Widget _stateChip(BuildContext context, IdentityVerificationState state) {
+    final (color, icon, label) = switch (state) {
+      IdentityVerificationState.verified => (
+          Colors.green,
+          Icons.verified_user,
+          'identity.state_verified'.tr()
+        ),
+      IdentityVerificationState.changed => (
+          Colors.red,
+          Icons.gpp_bad,
+          'identity.state_changed'.tr()
+        ),
+      IdentityVerificationState.unverified => (
+          Colors.grey,
+          Icons.shield_outlined,
+          'identity.state_unverified'.tr()
+        ),
+      IdentityVerificationState.unknown => (
+          Colors.grey,
+          Icons.help_outline,
+          'identity.state_unknown'.tr()
+        ),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

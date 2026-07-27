@@ -1,0 +1,17 @@
+# Vendored third-party Supabase self-hosted stack (not our code — it ships
+# demo/example secrets, internal service config, and a dev compose). Upstream.
+supabase-docker/
+
+# Generated / vendored web runtime assets
+web/sqflite_sw.js
+web/flutter_service_worker.js
+web/canvaskit/
+
+# Generated Dart sources
+*.g.dart
+*.freezed.dart
+
+# Test fixtures use dummy/demo tokens — not production secrets
+# (CLAUDE.md excludes test/** from static analysis).
+test/
+mcp_server/test/

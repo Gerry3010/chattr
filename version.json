@@ -1,0 +1,9 @@
+{
+  "app_version": "1.9.2",
+  "build_number": 29,
+  "backend_version": "1.4.0",
+  "min_backend_version": "1.0.0",
+  "min_client_version": "1.0.0",
+  "landing_version": "1.2.0",
+  "changelog_url": "https://bitbucket.org/Gerry3010/chattr/src/main/CHANGELOG.md"
+}

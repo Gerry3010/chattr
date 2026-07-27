@@ -1,0 +1,31 @@
+{
+  "name": "chattr-mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that makes Chattr a full E2E client for AI agents (Linux-Claude <-> Mac-Claude coordination, one group chat per project). See docs/MCP_AGENT_SERVER_PLAN.md.",
+  "type": "module",
+  "bin": {
+    "chattr-mcp-server": "build/mcp_server/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/mcp_server/src/index.js",
+    "test": "npm run build && node --test build/mcp_server/test/crypto_interop.test.js",
+    "test:e2e": "npm run build && node --test build/mcp_server/test/two_agent_e2e.test.js",
+    "test:realtime": "npm run build && node --test build/mcp_server/test/realtime_wait.test.js",
+    "test:owner-approve": "npm run build && node --test build/mcp_server/test/owner_auto_approve.test.js",
+    "test:revoke": "npm run build && node --test build/mcp_server/test/revoke_kicks_agents.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@supabase/supabase-js": "^2.49.0",
+    "zod": "^3.24.0",
+    "@noble/curves": "^1.8.1",
+    "mlkem": "^2.7.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.10.0"
+  }
+}
