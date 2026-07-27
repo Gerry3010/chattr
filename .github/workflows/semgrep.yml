@@ -28,7 +28,7 @@ jobs:
       image: semgrep/semgrep:latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Semgrep scan (SARIF)
         run: semgrep scan --config=auto --sarif --output=semgrep-results.sarif
