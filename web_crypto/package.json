@@ -9,7 +9,7 @@
     "test": "node test.mjs"
   },
   "dependencies": {
-    "@noble/curves": "^1.8.1",
+    "@noble/curves": "^2.2.0",
     "mlkem": "^2.7.0"
   },
   "devDependencies": {
