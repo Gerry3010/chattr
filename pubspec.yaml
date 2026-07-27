@@ -38,7 +38,7 @@ dependencies:
 
   # State Management (Riverpod 3 — StateNotifier/StateProvider come from the
   # riverpod legacy library; full Notifier migration is a separate task)
-  flutter_riverpod: ^3.3.2
+  flutter_riverpod: ^3.4.1
   flutter_hooks: ^0.21.3
   hooks_riverpod: ^3.3.2
 
@@ -67,7 +67,7 @@ dependencies:
 
   # QR
   qr_flutter: ^4.1.0
-  mobile_scanner: ^7.0.0
+  mobile_scanner: ^7.4.0
 
   # Sharing (13.x needs win32 ^6, which stable file_picker <12 can't share)
   share_plus: ^12.0.0
@@ -82,7 +82,7 @@ dependencies:
   record: ^7.1.1
 
   # JetBrains Mono for the terminal/Matrix theme
-  google_fonts: ^8.1.0
+  google_fonts: ^8.2.0
 
   # SVG theme wallpapers (chat background)
   flutter_svg: ^2.0.10+1
@@ -115,7 +115,7 @@ dependencies:
   # Pre-send media editing (all platforms). Pure-Flutter image editor:
   # crop/rotate/flip, paint incl. blur/pixelate censoring, text, filters, tune,
   # emoji, sticker. Bytes-in/bytes-out → slots into the caption/preview stage.
-  pro_image_editor: ^13.2.0
+  pro_image_editor: ^13.2.3
   # Native pre-send video cut + audio-strip (Android/iOS, no ffmpeg). Does the
   # actual trim(start,end) + removeAudio export in the trim screen; the scrub UI
   # + preview run on media_kit (our playback engine). Replaced video_trimmer,
@@ -128,7 +128,7 @@ dependencies:
   chatview_utils: ^3.0.0
 
   # Utils
-  uuid: ^4.4.0
+  uuid: ^4.6.0
   # CommonMark parser for the safe markdown message subset (lib/features/markdown).
   # Pure Dart, AST only — we render a restricted, safe subset ourselves (no raw
   # HTML, no external images), so nothing untrusted is ever fetched/rendered.
@@ -161,7 +161,7 @@ dependencies:
   # Push Notifications
   firebase_core: ^4.3.0
   firebase_messaging: ^16.1.0
-  flutter_local_notifications: ^22.0.1
+  flutter_local_notifications: ^22.2.0
   # App-icon badge reset (iOS setBadgeCount / Android launcher badge). Used by
   # FCMService.clearDeliveredNotifications() to drop the icon badge to 0.
   app_badge_plus: ^1.2.5
@@ -175,7 +175,7 @@ dependencies:
   bip39: ^1.0.6
   # UI automation (debug only, MarionetteBinding in main.dart).
   # Pinned to the installed marionette_mcp server version.
-  marionette_flutter: 0.5.0
+  marionette_flutter: 0.6.0
   share_handler: ^0.0.25
   # Rich clipboard read for composer paste (Ctrl/Cmd+V image/file) — Flutter's
   # Clipboard is text-only. Native layer builds via Rust (cargokit): desktop/
