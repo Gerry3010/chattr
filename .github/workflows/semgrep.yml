@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Semgrep SAST — mirrors the Bitbucket `security-fast` step so the Dart/Flutter
+# code (which CodeQL cannot analyze) is still covered on the public mirror.
+# `--config=auto` pulls community Dart + Go + JS rulesets anonymously (no
+# SEMGREP_APP_TOKEN). Findings are uploaded to GitHub code scanning as SARIF.
+# Non-blocking: it reports, it never fails the build.
+name: Semgrep
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "37 3 * * 1" # Monday 03:37 UTC
+  workflow_dispatch:
+
+jobs:
+  semgrep:
+    name: Semgrep scan
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Semgrep scan (SARIF)
+        run: semgrep scan --config=auto --sarif --output=semgrep-results.sarif
+        # Report, don't gate — same posture as the Bitbucket suite.
+        continue-on-error: true
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep-results.sarif
+          category: semgrep

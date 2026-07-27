@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chattr - Secure End-to-End Encrypted Chat</title>
+    <meta name="description" content="Chattr: Ende-zu-Ende verschlüsselter Messenger. Anonym, ohne Telefonnummer, der Server vergisst deine Nachrichten.">
+    <link rel="icon" type="image/svg+xml" href="assets/icons/logo-nobg.svg">
+    <link rel="icon" type="image/png" href="assets/icons/logo-nobg.png">
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+    <!-- Theme Toggle -->
+    <button class="theme-toggle" id="themeToggle" aria-label="Toggle dark mode">
+        <span class="icon-sun">☀️</span>
+        <span class="icon-moon">🌙</span>
+    </button>
+
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="hero-content">
+            <picture>
+                <source srcset="assets/icons/logo-nobg.svg" type="image/svg+xml">
+                <img src="assets/icons/logo-nobg.png" alt="Chattr Logo" class="logo">
+            </picture>
+            <h1>Chattr</h1>
+            <p>Ende-zu-Ende verschlüsselte Kommunikation. Privat. Sicher. Einfach.</p>
+            <div class="hero-actions">
+                <a href="https://app.chattr.geraldhofbauer.net" class="cta-button">App öffnen</a>
+                <a href="https://geraldhofbauer.net/files/chattr-android" class="cta-button cta-secondary">Android-APK laden</a>
+            </div>
+            <p class="hero-platforms">Web&nbsp;·&nbsp;PWA&nbsp;·&nbsp;Android&nbsp;·&nbsp;iOS&nbsp;(TestFlight)</p>
+            <p class="hero-disclaimer">Unveröffentlichter Prototyp in offener Beta — Nutzung auf
+                eigene Gefahr. Kein offizielles Release, kein Support. Soweit gesetzlich zulässig,
+                wird während der Beta-Phase keine Haftung für Schäden, Datenverlust oder
+                Datenlecks übernommen.</p>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section class="features">
+        <div class="features-container">
+            <h2>Warum Chattr?</h2>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon"><svg viewBox="0 0 24 24" width="40" height="40"><circle cx="12" cy="12" r="11" fill="#0ea5e9"/><rect x="7" y="10.4" width="10" height="7.2" rx="1.4" fill="#fff"/><path d="M9 10.4V8.6a3 3 0 0 1 6 0v1.8" fill="none" stroke="#fff" stroke-width="1.8"/><circle cx="12" cy="13.8" r="1.2" fill="#0ea5e9"/></svg></div>
+                    <h3>End-to-End Verschlüsselung</h3>
+                    <p>Post-Quantum-Hybrid (X25519 + ML-KEM-768) pro Chat, jede Nachricht einzeln pro Empfänger verschlüsselt. Nur du und deine Kontakte können lesen, was geschrieben wird.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><svg viewBox="0 0 24 24" width="40" height="40"><circle cx="12" cy="12" r="11" fill="#14b8a6"/><circle cx="12" cy="9.5" r="3.4" fill="#fff"/><path d="M5.5 19a6.5 5.4 0 0 1 13 0z" fill="#fff"/></svg></div>
+                    <h3>Anonyme Anmeldung</h3>
+                    <p>Keine E-Mail, keine Telefonnummer. Nur ein Benutzername — gefunden wirst du ausschließlich über deinen QR-Code.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><svg viewBox="0 0 24 24" width="40" height="40"><circle cx="12" cy="12" r="11" fill="#64748b"/><path d="M8 8.5h8l-.7 9a1.6 1.6 0 0 1-1.6 1.5h-3.4a1.6 1.6 0 0 1-1.6-1.5z" fill="#fff"/><rect x="7" y="6.4" width="10" height="1.6" rx="0.8" fill="#fff"/><rect x="10.2" y="4.8" width="3.6" height="1.6" rx="0.8" fill="#fff"/></svg></div>
+                    <h3>Der Server vergisst</h3>
+                    <p>Zugestellte Nachrichten werden serverseitig sofort gelöscht — die verschlüsselte Kopie auf deinem Gerät ist die einzige.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><svg viewBox="0 0 24 24" width="40" height="40"><circle cx="12" cy="12" r="11" fill="#6366f1"/><path d="M5.5 7.5h9a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5H9l-2.8 2.2V14.5H5.5A1.5 1.5 0 0 1 4 13V9a1.5 1.5 0 0 1 1.5-1.5z" fill="#fff"/><path d="M17.5 10h1A1.5 1.5 0 0 1 20 11.5v3a1.5 1.5 0 0 1-1.5 1.5H18v1.8L15.8 16h-1.3" fill="none" stroke="#fff" stroke-width="1.3"/></svg></div>
+                    <h3>Gruppen- &amp; Einzelchats</h3>
+                    <p>Echtzeit-Messaging mit Zustell- und Lesebestätigungen, Antworten, Reaktionen, Bearbeiten und „Für alle löschen".</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><svg viewBox="0 0 24 24" width="40" height="40"><circle cx="12" cy="12" r="11" fill="#a855f7"/><rect x="5.5" y="7" width="13" height="10" rx="1.6" fill="#fff"/><circle cx="9.2" cy="10.4" r="1.3" fill="#a855f7"/><path d="M7 15.5l3.2-3 2.3 2.1 2.6-2.6 2.4 3.5z" fill="#a855f7"/></svg></div>
+                    <h3>Medien bis 500 MB</h3>
+                    <p>Fotos, Videos, Dateien und Sprachnachrichten — clientseitig AES-verschlüsselt, bevor sie das Gerät verlassen.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><svg viewBox="0 0 24 24" width="40" height="40"><circle cx="12" cy="12" r="11" fill="#f97316"/><rect x="6" y="6" width="5" height="5" rx="1" fill="#fff"/><rect x="13" y="6" width="5" height="5" rx="1" fill="#fff"/><rect x="6" y="13" width="5" height="5" rx="1" fill="#fff"/><rect x="13.7" y="13.7" width="1.7" height="1.7" fill="#fff"/><rect x="16.3" y="13.7" width="1.7" height="1.7" fill="#fff"/><rect x="13.7" y="16.3" width="1.7" height="1.7" fill="#fff"/><rect x="16.3" y="16.3" width="1.7" height="1.7" fill="#fff"/></svg></div>
+                    <h3>QR-Code Sharing</h3>
+                    <p>Kontakte und Gruppen blitzschnell per QR-Code teilen — Gruppenbeitritte bestätigt ein Admin.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><svg viewBox="0 0 24 24" width="40" height="40"><circle cx="12" cy="12" r="11" fill="#eab308"/><circle cx="12" cy="12" r="6.3" fill="#fff"/><path d="M12 8.4V12l2.4 1.6" fill="none" stroke="#eab308" stroke-width="1.6" stroke-linecap="round"/></svg></div>
+                    <h3>Selbstzerstörende Nachrichten</h3>
+                    <p>Optionaler Timer pro Chat: Nachrichten laufen serverseitig ab — auch wenn die App geschlossen ist.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><svg viewBox="0 0 24 24" width="40" height="40"><circle cx="12" cy="12" r="11" fill="#ec4899"/><path d="M12 6.2a5.8 5.8 0 0 1 5.8 5.8c0 1.5-1 2.3-2.2 2.3h-1.2a1.5 1.5 0 0 0-1.1 2.5c.4.5.2 1.4-.7 1.5A5.9 5.9 0 0 1 12 6.2z" fill="#fff"/><circle cx="9.3" cy="9.6" r="1" fill="#ec4899"/><circle cx="13.3" cy="8.6" r="1" fill="#ec4899"/><circle cx="15.6" cy="11" r="1" fill="#ec4899"/><circle cx="8.6" cy="12.9" r="1" fill="#ec4899"/></svg></div>
+                    <h3>10 Themes</h3>
+                    <p>Von klassisch bis Matrix-Terminal, mit fotorealistischen Chat-Wallpapern — hell und dunkel.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><svg viewBox="0 0 24 24" width="40" height="40"><circle cx="12" cy="12" r="11" fill="#22c55e"/><rect x="7" y="10.5" width="10" height="7" rx="1.4" fill="#fff"/><path d="M9.2 10.5V8.8a2.8 2.8 0 0 1 5.6 0" fill="none" stroke="#fff" stroke-width="1.7"/><path d="M10.4 14l1.3 1.3 2.3-2.6" fill="none" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round"/></svg></div>
+                    <h3>App-Sperre &amp; Schutz</h3>
+                    <p>Face ID / Passcode, Blur im App-Umschalter, Screenshot-Schutz auf Android und Blockieren unerwünschter Kontakte.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Pledge: never client-side scanning -->
+    <section class="pledge" id="pledge">
+        <div class="pledge-card">
+            <div class="pledge-icon">
+                <svg viewBox="0 0 24 24" width="48" height="48" aria-hidden="true">
+                    <path d="M12 2.5 4.5 5.5v5.2c0 4.6 3.1 8.9 7.5 10.3 4.4-1.4 7.5-5.7 7.5-10.3V5.5z" fill="var(--accent)"/>
+                    <path d="M8.8 12.2l2.1 2.1 4.3-4.6" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+            </div>
+            <h2>Niemals Client-Side-Scanning</h2>
+            <p>Ende-zu-Ende-Verschlüsselung ist wertlos, wenn dein Gerät die Nachrichten
+                schon <em>vor</em> dem Verschlüsseln durchleuchtet. Genau das ist
+                Client-Side-Scanning — eine Hintertür, die Chattr unter keinen Umständen
+                einbaut. Sollte sie je gesetzlich erzwungen werden, geht Chattr offline,
+                bevor auch nur eine einzige deiner Nachrichten gescannt wird.</p>
+        </div>
+    </section>
+
+    <!-- Technik Section (Flowcharts, Accordion) -->
+    <!-- Diagramm-Quellen: assets/js/flow-sources.js — gespiegelt aus
+         docs/FLOW.md (Konvention in CLAUDE.md). -->
+    <section class="flow" id="technik">
+        <div class="flow-container">
+            <h2>Technik</h2>
+            <p class="flow-intro">
+                Wie Chattr unter der Haube funktioniert: alle Abläufe als
+                Flowcharts — vom anonymen Konto über den Schlüsseltausch bis
+                zum Blockieren. Asynchron, Ende-zu-Ende verschlüsselt, und der
+                Server sieht nie Klartext.
+            </p>
+            <div id="flowAccordion"></div>
+            <p class="flow-all-link">
+                <a href="technik.html">Alle Flowcharts ausgeklappt auf einer Seite ansehen&nbsp;→</a>
+            </p>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <p>&copy; 2025 – 2026 <a href="https://geraldhofbauer.net">Gerald Hofbauer</a> v1.2.0</p>
+        <p class="version-info">Client v1.9.2 • Backend v1.4.0</p>
+        <p class="open-source-notice">Open Source (AGPL-3.0) – Code-Veröffentlichung in Vorbereitung</p>
+    </footer>
+
+    <script src="assets/js/theme.js"></script>
+    <script src="assets/js/mermaid.min.js"></script>
+    <script src="assets/js/flow-sources.js"></script>
+    <script src="assets/js/flow-diagram.js"></script>
+</body>
+</html>

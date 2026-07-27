@@ -1,0 +1,122 @@
+# Codemagic CI/CD - Android release build + Google Play internal publishing.
+#
+# The native hybrid-KEM crypto (.so) is gitignored and built per-machine, so the
+# pipeline compiles it (Go + Android NDK) before the Flutter build.
+#
+# super_clipboard's native layer (super_native_extensions) builds via cargokit,
+# so the pipeline also installs a Rust toolchain + the Android targets before
+# `flutter build` (see the "Install Rust" step).
+#
+# Set these up in the Codemagic UI (Environment variables -> groups):
+#   group "keystore":
+#     CM_KEYSTORE           = base64 of android/upload-keystore.jks  (base64-encoded, "secure")
+#     CM_KEYSTORE_PASSWORD  = the store password
+#     CM_KEY_PASSWORD       = the key password
+#     CM_KEY_ALIAS          = upload
+#   group "supabase":
+#     SUPABASE_URL, SUPABASE_ANON_KEY
+#   group "google_play":
+#     GCLOUD_SERVICE_ACCOUNT_CREDENTIALS = the Play service-account JSON ("secure")
+#
+# Generate CM_KEYSTORE locally with:  base64 -w0 android/upload-keystore.jks
+
+workflows:
+  android-internal:
+    name: Android -> Play internal
+    instance_type: linux_x2
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      java: 17
+      groups:
+        - keystore
+        - supabase
+        - google_play
+    cache:
+      cache_paths:
+        - $HOME/.pub-cache
+        - $HOME/go/pkg/mod
+        - $HOME/.cargo
+        - $HOME/.rustup
+    scripts:
+      - name: Install Go
+        script: |
+          set -e
+          if ! command -v go >/dev/null 2>&1; then
+            curl -sSL https://go.dev/dl/go1.23.4.linux-amd64.tar.gz | tar -C "$HOME" -xz
+            echo "PATH=$HOME/go/bin:$PATH" >> "$CM_ENV"
+            export PATH="$HOME/go/bin:$PATH"
+          fi
+          go version
+
+      - name: Install Rust (super_native_extensions / cargokit)
+        script: |
+          set -e
+          # cargokit builds super_native_extensions from Rust during the Flutter
+          # build; provide the toolchain + Android target std libs. Cached via
+          # $HOME/.cargo + $HOME/.rustup across runs.
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "PATH=$HOME/.cargo/bin:$PATH" >> "$CM_ENV"
+          rustup target add \
+            aarch64-linux-android armv7-linux-androideabi \
+            i686-linux-android x86_64-linux-android
+          rustc --version && cargo --version
+
+      - name: Build native crypto libs (host + all Android ABIs)
+        script: |
+          set -e
+          # Locate the NDK that Codemagic ships with the Android SDK.
+          export ANDROID_NDK_HOME="$(ls -d "$ANDROID_SDK_ROOT"/ndk/* 2>/dev/null | sort -V | tail -1)"
+          echo "Using NDK: $ANDROID_NDK_HOME"
+          ./native/build.sh host
+          ./native/build.sh android
+          find android/app/src/main/jniLibs -name '*.so'
+
+      - name: Set up release signing (key.properties + keystore)
+        script: |
+          set -e
+          echo "$CM_KEYSTORE" | base64 --decode > "$CM_BUILD_DIR/android/upload-keystore.jks"
+          cat > "$CM_BUILD_DIR/android/key.properties" <<EOF
+          storePassword=$CM_KEYSTORE_PASSWORD
+          keyPassword=$CM_KEY_PASSWORD
+          keyAlias=$CM_KEY_ALIAS
+          storeFile=upload-keystore.jks
+          EOF
+
+      - name: Write .env
+        script: |
+          echo "SUPABASE_URL=$SUPABASE_URL" > .env
+          echo "SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY" >> .env
+
+      - name: Flutter dependencies
+        script: flutter pub get
+
+      - name: Analyze & test
+        script: |
+          flutter analyze
+          flutter test --exclude-tags integration
+
+      - name: Build AAB
+        script: |
+          # versionCode must increment on every Play upload - derive it from the
+          # Codemagic build counter so re-runs always go up.
+          flutter build appbundle --release \
+            --build-number="$PROJECT_BUILD_NUMBER"
+    artifacts:
+      - build/**/outputs/bundle/**/*.aab
+      - build/**/outputs/**/mapping.txt
+    publishing:
+      google_play:
+        credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+        track: internal
+        submit_as_draft: false
+      scripts:
+        - name: Notify pipepush
+          script: |
+            if [ -z "$PIPEPUSH_TOKEN" ]; then echo "pipepush: PIPEPUSH_TOKEN unset - skipping"; exit 0; fi
+            if [ "$CM_BUILD_STEP_STATUS" = "success" ]; then STATUS=success; else STATUS=failure; fi
+            curl -sf -X POST "$PIPEPUSH_SERVER/api/webhook" -H "Content-Type: application/json" \
+              -d "{\"token\":\"$PIPEPUSH_TOKEN\",\"status\":\"$STATUS\",\"pipeline\":\"$CM_WORKFLOW_ID\",\"branch\":\"${CM_BRANCH:-$CM_TAG}\",\"commit\":\"$CM_COMMIT\",\"runId\":\"$BUILD_NUMBER\"}" || true

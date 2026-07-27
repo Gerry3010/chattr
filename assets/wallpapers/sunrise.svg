@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 800" preserveAspectRatio="xMidYMid slice">
+  <!-- Rising sun on the horizon -->
+  <g opacity="0.12">
+    <path d="M140 260 a 60 60 0 0 1 120 0 Z" fill="#FF7043"/>
+  </g>
+  <!-- Sun rays -->
+  <g stroke="#FF8A65" stroke-width="2" opacity="0.12" fill="none">
+    <line x1="200" y1="150" x2="200" y2="120"/>
+    <line x1="140" y1="175" x2="120" y2="152"/>
+    <line x1="260" y1="175" x2="280" y2="152"/>
+    <line x1="110" y1="235" x2="80" y2="228"/>
+    <line x1="290" y1="235" x2="320" y2="228"/>
+  </g>
+  <!-- Horizon lines -->
+  <g stroke="#FFAB91" stroke-width="2" opacity="0.12" fill="none">
+    <line x1="-20" y1="260" x2="420" y2="260"/>
+    <line x1="30" y1="300" x2="370" y2="300"/>
+    <line x1="80" y1="340" x2="320" y2="340"/>
+  </g>
+  <!-- Soft morning clouds -->
+  <g fill="#FF7043" opacity="0.07">
+    <ellipse cx="90" cy="460" rx="60" ry="12"/>
+    <ellipse cx="300" cy="540" rx="70" ry="13"/>
+    <ellipse cx="150" cy="640" rx="55" ry="11"/>
+    <ellipse cx="320" cy="730" rx="60" ry="12"/>
+  </g>
+  <!-- Birds -->
+  <g stroke="#BF5F3C" stroke-width="2" fill="none" opacity="0.14">
+    <path d="M120 90 q 8 -8 16 0 q 8 -8 16 0"/>
+    <path d="M70 130 q 6 -6 12 0 q 6 -6 12 0"/>
+  </g>
+</svg>

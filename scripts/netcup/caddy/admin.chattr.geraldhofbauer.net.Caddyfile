@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Caddy site block for the internal Chattr admin console. Add this to the live
+# Caddyfile on the netcup box (<prod-host>) — either paste it in or `import`
+# this file — then `caddy reload`. Caddy provisions the TLS cert automatically.
+#
+# The REAL access gate is Caddy basic_auth here (a browser can't hide the API
+# secret the page uses). Generate the bcrypt hash with:
+#     caddy hash-password --plaintext 'your-strong-password'
+# and paste it below (see scripts/netcup/setup-admin-dashboard.sh for a helper).
+#
+# Bound mode: the static page AND the secret-injecting API proxy are served by
+# the admin-proxy sidecar inside the Supabase compose stack (published on
+# 127.0.0.1:8899). This Caddy site only terminates TLS + mTLS + basic_auth and
+# reverse-proxies to it — the ADMIN_STATS_SECRET never leaves the server.
+
+admin.chattr.geraldhofbauer.net {
+	reverse_proxy 127.0.0.1:8899
+	encode gzip
+
+	# >>> mTLS (optional — remove this whole block for basic_auth-only, or let
+	# setup-admin-dashboard.sh strip it when ADMIN_MTLS=off). Requires a client
+	# cert signed by our admin CA — only enrolled devices complete the handshake.
+	# Upload the CA from scripts/admin-mtls/make-ca-and-cert.sh to the path below.
+	# Caddy <=2.7 uses `trusted_ca_cert_file`; on 2.8+ use instead:
+	#   trust_pool file { pem_file /home/chattr/chattr-admin-ca.crt }
+	tls {
+		client_auth {
+			mode require_and_verify
+			trusted_ca_cert_file /home/chattr/chattr-admin-ca.crt
+		}
+	}
+	# <<< mTLS
+
+	# --- basic_auth ---
+	basic_auth {
+		# admin  <bcrypt-hash>
+		admin REPLACE_WITH_BCRYPT_HASH
+	}
+
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/admin.chattr.access.log
+	}
+}

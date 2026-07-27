@@ -1,0 +1,2 @@
+-- Note: private.get_secret function is now defined in migration 00024_add_vault_get_secret_function.sql
+-- This file can be used for seed data only

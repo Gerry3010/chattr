@@ -1,0 +1,411 @@
+image: ghcr.io/cirruslabs/flutter:3.44.0
+
+definitions:
+  caches:
+    flutter-pub: ~/.pub-cache
+    flutter-build: .dart_tool
+  steps:
+    # Static analysis + unit tests. Integration tests (live Supabase / native
+    # crypto) self-skip when those aren't present, so this runs anywhere.
+    - step: &analyze-and-test
+        name: Analyze & Test
+        # Läuft auf den self-hosted Netcup-Runnern (workspace-weit) statt BB-Cloud.
+        runs-on:
+          - self.hosted
+          - linux
+        caches:
+          - flutter-pub
+          - flutter-build
+        script:
+          # Ein gebündelter Block, dessen Output nach pipe.log gespiegelt wird,
+          # damit das after-script bei Fehler die letzten Zeilen an die pipepush-
+          # Notification hängen kann. set -eo pipefail erhält die Fail-Fast- und
+          # Exit-Code-Semantik der früheren item-Liste (tee würde den Code sonst
+          # schlucken).
+          - |
+            set -eo pipefail
+            {
+              flutter --version
+              # webcrypto 0.6.1 builds its native assets via a build hook that
+              # needs cmake (+ ninja) on the host — not in the flutter image.
+              apt-get update && apt-get install -y cmake ninja-build
+              # pubspec declares .env as an asset; create a placeholder so
+              # `flutter analyze` doesn't fail with asset_does_not_exist (the real
+              # .env is written from secrets in the Build step). Unit tests don't
+              # read it.
+              printf 'SUPABASE_URL=placeholder\nSUPABASE_ANON_KEY=placeholder\n' > .env
+              # The `flutter-pub: ~/.pub-cache` cache retains git dependencies
+              # (chatview / chatview_utils forks) keyed by URL. When a fork TAG moves
+              # (e.g. chattr-3.1.0-p10 → p11), pub reuses the stale cached checkout and
+              # resolves the fork's OWN pubspec from the old commit — silently dropping
+              # chatview's transitive deps (emoji_picker_flutter, any_link_preview, …)
+              # and leaving package_graph.json inconsistent ("dependencies for X
+              # missing"). Removing the git cache forces a fresh clone of the pinned
+              # ref, so resolution is correct; hosted packages stay cached. Also drop
+              # the regenerable .dart_tool manifests so the graph is rebuilt clean.
+              rm -rf ~/.pub-cache/git .dart_tool/package_graph.json .dart_tool/package_config.json
+              flutter pub get
+              flutter analyze
+              flutter test --exclude-tags integration
+            } 2>&1 | tee "${BITBUCKET_CLONE_DIR:-.}/pipe.log"
+
+        after-script:
+          # pipepush: nur bei Fehler melden (Erfolg meldet der Deploy-Step).
+          # Der Helper hängt Build-Log-Link + (bei Fehler) den Step-Log-Tail an.
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" failure-only
+
+    # ── Security scans ──────────────────────────────────────────────────────
+    # SAST on every push (fast, non-blocking, runs parallel to analyze-and-test
+    # so it never gates the deploy). --config=auto pulls community rulesets
+    # (Dart + Go) from the registry anonymously; no SEMGREP_APP_TOKEN needed.
+    - step: &security-fast
+        name: "Security – SAST (Semgrep)"
+        # Läuft auf den self-hosted Netcup-Runnern statt BB-Cloud.
+        runs-on:
+          - self.hosted
+          - linux
+        # pip-installed semgrep in a plain python image, NOT the official
+        # returntocorp/semgrep image — the latter's docker-entrypoint expects the
+        # code mounted at /src and aborts in Bitbucket (code lives in the clone
+        # dir). pip install avoids that detection entirely. One scan, both
+        # machine-readable artifacts (--*-output combine), text summary to log.
+        image: python:3.12-slim
+        script:
+          - pip install --quiet semgrep
+          - semgrep scan --config=auto --json-output=semgrep-results.json --sarif-output=semgrep-results.sarif || true
+        artifacts:
+          - semgrep-results.json
+          - semgrep-results.sarif
+
+    # Dependency & container CVE scan — Trivy fs scans pubspec.lock AND
+    # native/chattr_crypto/go.sum in one pass. Never fails the pipeline.
+    - step: &trivy-scan
+        name: "Security – Deps & Container (Trivy)"
+        image: aquasec/trivy:latest
+        script:
+          - trivy fs --severity HIGH,CRITICAL --format json --output trivy-fs-results.json --exit-code 0 .
+          - trivy fs --severity HIGH,CRITICAL --exit-code 0 .
+        artifacts:
+          - trivy-fs-results.json
+
+    # Go CVEs for the native crypto core (ML-KEM-768 via cloudflare/circl).
+    # Image matches go.mod's `go 1.26`.
+    - step: &govulncheck-scan
+        name: "Security – Go CVEs (govulncheck)"
+        image: golang:1.26
+        script:
+          - go install golang.org/x/vuln/cmd/govulncheck@latest
+          - export PATH="$PATH:$(go env GOPATH)/bin"
+          - (cd native/chattr_crypto && govulncheck ./...) | tee govulncheck-results.txt || true
+        artifacts:
+          - govulncheck-results.txt
+
+    # DAST — OWASP ZAP baseline (passive). Runs ONLY against $STAGING_URL and
+    # self-skips if that repo var is unset, so it can NEVER hit prod. Wired up
+    # in Phase B once the persistent staging stack exists.
+    - step: &zap-baseline
+        name: "Security – DAST (OWASP ZAP Baseline)"
+        image: ghcr.io/zaproxy/zaproxy:stable
+        script:
+          - |
+            if [ -z "${STAGING_URL:-}" ]; then
+              echo "STAGING_URL nicht gesetzt — ZAP übersprungen (nie gegen Prod)."
+              exit 0
+            fi
+          # ZAP writes file reports to /zap/wrk; it aborts with "not mounted" if
+          # that dir doesn't exist (Bitbucket can't mount volumes), so create it.
+          - mkdir -p /zap/wrk
+          - zap-baseline.py -t "$STAGING_URL" -r zap-report.html -J zap-report.json -I || true
+          - for f in zap-report.html zap-report.json; do [ -f "/zap/wrk/$f" ] && cp "/zap/wrk/$f" . || true; done
+        artifacts:
+          - zap-report.html
+          - zap-report.json
+
+    # One pipepush notification summarizing all findings (weekly only).
+    # Reuses the existing PIPEPUSH_TOKEN but posts under pipeline "security-scan"
+    # → its own clearly-named notification stream in the chattr project.
+    - step: &pipepush-notify
+        name: "Security – Pipepush-Benachrichtigung"
+        image: python:3.12-slim
+        script:
+          - pip install --quiet requests
+          - python scripts/notify_via_pipepush.py
+
+    # ── Staging deploy (custom pipeline, manual/scheduled) ──────────────────
+    # Builds the web app against the STAGING Supabase and ships it to the
+    # persistent staging stack on the VPS (own isolated Supabase, see
+    # docs/STAGING_SETUP.md). Replaces the one-off manual seed. The staging
+    # ZAP/DAST target (STAGING_URL) is kept current by this.
+    - step: &build-staging
+        name: "Build Web (Staging)"
+        image: ghcr.io/cirruslabs/flutter:3.44.0
+        caches:
+          - flutter-pub
+          - flutter-build
+        script:
+          - apt-get update && apt-get install -y cmake ninja-build
+          # Force a fresh clone of pinned git deps + rebuild the graph (see Analyze step).
+          - rm -rf ~/.pub-cache/git .dart_tool/package_graph.json .dart_tool/package_config.json
+          - flutter pub get
+          - echo "SUPABASE_URL=${{STAGING_SUPABASE_URL}}" > .env
+          - echo "SUPABASE_ANDROID_URL=${{STAGING_SUPABASE_URL}}" >> .env
+          - echo "SUPABASE_ANON_KEY=${{STAGING_SUPABASE_ANON_KEY}}" >> .env
+          - flutter build web --release
+        artifacts:
+          - build/web/**
+
+    - step: &deploy-staging
+        name: "Deploy to Staging"
+        deployment: staging
+        image: atlassian/default-image:3
+        # Staging lives on the IONOS box (its own STAGING_SERVER_ADDR var), NOT the
+        # repo-wide SERVER_ADDR which now points at the netcup prod box after the
+        # Wien migration. Prod deploy below keeps using SERVER_ADDR (netcup).
+        script:
+          - apt-get update && apt-get install -y rsync openssh-client
+          # Web app → staging web root.
+          - rsync -az --delete build/web/ chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/web/
+          # Admin console (static) → staging admin root (served by the IONOS nginx
+          # vhost staging-admin.chattr.geraldhofbauer.net behind basic_auth).
+          - rsync -az --delete landing/admin/ chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/admin/
+          # Supabase stack → staging, PRESERVING the staging-only files: the
+          # generated .env (own keys), the isolated compose, the migration
+          # history (tracks what's applied to staging), and the data volumes.
+          - rsync -az --exclude='.env' --exclude='docker-compose.staging.yml' --exclude='docker-compose.override.yml' --exclude='.migration_history' --exclude='volumes/db/data' --exclude='volumes/storage' supabase/ chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/supabase/
+          # admin-stats gate secret → staging (file passthrough; heredoc below is
+          # single-quoted). No-op if unset.
+          - |
+            if [ -n "${ADMIN_STATS_SECRET:-}" ]; then
+              printf '%s' "$ADMIN_STATS_SECRET" > admin_stats_secret
+              rsync -az admin_stats_secret chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/supabase/.admin_stats_secret
+              rm -f admin_stats_secret
+            fi
+          - |
+            ssh chattr@${{STAGING_SERVER_ADDR}} << 'EOF'
+              set -e
+              cd ~/staging/supabase
+              # Inject the admin-stats gate secret into the staging .env (idempotent).
+              if [ -s .admin_stats_secret ] && [ -f .env ]; then
+                { grep -v '^ADMIN_STATS_SECRET=' .env 2>/dev/null || true; printf "ADMIN_STATS_SECRET='%s'\n" "$(cat .admin_stats_secret)"; } > .env.new && mv .env.new .env
+              fi
+              rm -f .admin_stats_secret
+              export COMPOSE_PROJECT_NAME=chattr_staging
+              # Rebuild the isolated compose from the (possibly updated) prod one:
+              # prefix container names + rebind published ports to a 127.0.0.1
+              # staging range so it never collides with prod on the same engine.
+              sed -E \
+                -e 's|^(    container_name: )([^[:space:]]+)|\1staging-\2|' \
+                -e 's|^(      - )\$\{KONG_HTTP_PORT\}:8000/tcp|\1127.0.0.1:8110:8000/tcp|' \
+                -e 's|^(      - )\$\{KONG_HTTPS_PORT\}:8443/tcp|\1127.0.0.1:8153:8443/tcp|' \
+                -e 's|^(      - )\$\{POSTGRES_PORT\}:5432|\1127.0.0.1:5532:5432|' \
+                -e 's|^(      - )\$\{POOLER_PROXY_PORT_TRANSACTION\}:6543|\1127.0.0.1:6643:6543|' \
+                -e 's|^(      - )4000:4000|\1127.0.0.1:4110:4000|' \
+                -e 's|^(      - )"127.0.0.1:\$\{ADMIN_PANEL_PORT:-8899\}:80"|\1"127.0.0.1:8199:80"|' \
+                -e 's|\$\{ADMIN_PANEL_ROOT:-\.\./landing/admin\}|../admin|' \
+                docker-compose.yml > docker-compose.staging.yml
+              # Edge functions into the runtime dir (non-destructive; skip tests).
+              if [ -d functions ]; then mkdir -p volumes/functions && rsync -a --exclude='tests' functions/ volumes/functions/; fi
+              docker compose -f docker-compose.staging.yml pull
+              docker compose -f docker-compose.staging.yml up -d
+              docker compose -f docker-compose.staging.yml run --rm migrate
+              # Restart functions + admin-proxy so a rotated ADMIN_STATS_SECRET is re-read.
+              docker compose -f docker-compose.staging.yml restart functions admin-proxy 2>/dev/null || true
+            EOF
+        after-script:
+          # pipepush: Erfolg ODER Fehler melden, mit Build-Log-Link + Fehler-Tail.
+          - bash scripts/pipepush_notify.sh deploy-staging always
+
+pipelines:
+  # Every push on any branch (incl. pull requests) gets analyzed + tested.
+  # Semgrep SAST runs in parallel and is non-blocking (won't gate anything).
+  default:
+    - parallel:
+        - step: *analyze-and-test
+        - step: *security-fast
+
+  branches:
+    main:
+      # Gate the build/deploy behind a green analyze + test run. security-fast
+      # runs alongside but never blocks the deploy (its steps use `|| true`).
+      - parallel:
+          - step: *analyze-and-test
+          - step: *security-fast
+      - step:
+          name: Build Flutter Web
+          caches:
+            - flutter-pub
+            - flutter-build
+          script:
+            # Gebündelt + nach pipe.log gespiegelt (siehe analyze-and-test), damit
+            # das after-script bei Build-Fehler den Log-Tail mitschicken kann.
+            - |
+              set -eo pipefail
+              {
+                # Version aus version.json lesen
+                apt-get update && apt-get install -y jq
+                export APP_VERSION=$(jq -r '.app_version' version.json)
+                export BUILD_NUMBER=$(jq -r '.build_number' version.json)
+                echo "Building version $APP_VERSION+$BUILD_NUMBER"
+                # Frischer Klon der gepinnten git-Deps + Graph-Rebuild (s. Analyze-Step).
+                rm -rf ~/.pub-cache/git .dart_tool/package_graph.json .dart_tool/package_config.json
+                flutter pub get
+                echo "SUPABASE_URL=${{SUPABASE_URL}}" > .env
+                echo "SUPABASE_ANON_KEY=${{SUPABASE_ANON_KEY}}" >> .env
+                flutter build web --release --build-name=$APP_VERSION --build-number=$BUILD_NUMBER
+              } 2>&1 | tee "${BITBUCKET_CLONE_DIR:-.}/pipe.log"
+          artifacts:
+            - build/web/**
+            - landing/**
+            - version.json
+
+          after-script:
+            # pipepush: nur bei Fehler melden (Erfolg meldet der Deploy-Step).
+            - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" failure-only
+
+      - step:
+          name: Deploy to VPS
+          deployment: production
+          runs-on:
+            - self.hosted
+            - linux
+          image: atlassian/default-image:3
+          script:
+            # Read versions from version.json
+            - apt-get update && apt-get install -y rsync openssh-client jq
+            - export APP_VERSION=$(jq -r '.app_version' version.json)
+            - export BACKEND_VERSION=$(jq -r '.backend_version' version.json)
+            - export LANDING_VERSION=$(jq -r '.landing_version' version.json)
+            - echo "Deploying - App v$APP_VERSION | Backend v$BACKEND_VERSION | Landing v$LANDING_VERSION"
+            # Self-managed deploy key: the BB-managed SSH key isn't injected on
+            # self-hosted runners, so decode DEPLOY_SSH_KEY (secured repo var,
+            # base64) into a key file and use it explicitly for every ssh/rsync.
+            - |
+              install -m 700 -d "$HOME/.ssh"
+              printf '%s' "$DEPLOY_SSH_KEY" | base64 -d > "$HOME/.ssh/chattr_deploy"
+              chmod 600 "$HOME/.ssh/chattr_deploy"
+            - export SSHOPTS="-i $HOME/.ssh/chattr_deploy -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+            # Deploy Flutter Web app
+            - rsync -az --delete -e "ssh $SSHOPTS" build/web/ chattr@$SERVER_ADDR:/home/chattr/app/web/
+            # Deploy Landing Page
+            - rsync -az --delete -e "ssh $SSHOPTS" landing/ chattr@$SERVER_ADDR:/home/chattr/app/landing/
+            # Deploy Supabase and version.json
+            - rsync -az -e "ssh $SSHOPTS" supabase/ chattr@$SERVER_ADDR:/home/chattr/app/supabase/
+            - rsync -az -e "ssh $SSHOPTS" version.json chattr@$SERVER_ADDR:/home/chattr/app/
+            # Push the FCM service-account secret (BB secured repo var) to the VPS
+            # as a file — never echoed to logs. Skipped cleanly if the var is unset.
+            - |
+              if [ -n "${FCM_SERVICE_ACCOUNT:-}" ]; then
+                printf '%s' "$FCM_SERVICE_ACCOUNT" > fcm_sa.json
+                rsync -az -e "ssh $SSHOPTS" fcm_sa.json chattr@$SERVER_ADDR:/home/chattr/app/supabase/.fcm_sa.json
+                rm -f fcm_sa.json
+              fi
+            # admin-stats gate secret (plain string) — same file-based passthrough
+            # as FCM because the heredoc below is single-quoted. No-op if unset.
+            - |
+              if [ -n "${ADMIN_STATS_SECRET:-}" ]; then
+                printf '%s' "$ADMIN_STATS_SECRET" > admin_stats_secret
+                rsync -az -e "ssh $SSHOPTS" admin_stats_secret chattr@$SERVER_ADDR:/home/chattr/app/supabase/.admin_stats_secret
+                rm -f admin_stats_secret
+              fi
+            # Restart Supabase and run migrations
+            - |
+              ssh $SSHOPTS chattr@$SERVER_ADDR << 'EOF'
+                cd ~/app/supabase
+                # Inject the FCM service account into .env (idempotent, single-quoted
+                # so compose's dotenv keeps the JSON's double-quotes). Only if .env
+                # already exists, so we never replace it with just this one line.
+                if [ -s .fcm_sa.json ] && [ -f .env ]; then
+                  umask 077
+                  { grep -v '^FCM_SERVICE_ACCOUNT=' .env 2>/dev/null || true; printf "FCM_SERVICE_ACCOUNT='%s'\n" "$(cat .fcm_sa.json)"; } > .env.new
+                  mv .env.new .env
+                fi
+                rm -f .fcm_sa.json
+                # admin-stats gate secret → .env (idempotent; plain string, single
+                # quoted so any special chars survive compose's dotenv parsing).
+                if [ -s .admin_stats_secret ] && [ -f .env ]; then
+                  umask 077
+                  { grep -v '^ADMIN_STATS_SECRET=' .env 2>/dev/null || true; printf "ADMIN_STATS_SECRET='%s'\n" "$(cat .admin_stats_secret)"; } > .env.new
+                  mv .env.new .env
+                fi
+                rm -f .admin_stats_secret
+                # ADMIN_STATS_SECRET reaches the functions container via docker-compose.yml's
+                # own functions.environment (committed) + the .env line above — no override
+                # needed. FCM still uses the override below (it isn't in compose.yml).
+                # Pass the var into the functions container via a compose override —
+                # created only if a 'functions' service exists and nothing is clobbered.
+                if docker compose config --services 2>/dev/null | grep -qx functions && [ ! -e docker-compose.override.yml ]; then
+                  printf 'services:\n  functions:\n    environment:\n      FCM_SERVICE_ACCOUNT: ${FCM_SERVICE_ACCOUNT}\n' > docker-compose.override.yml
+                  echo "wrote docker-compose.override.yml (FCM passthrough)"
+                fi
+                # Edge functions: the runtime serves ./volumes/functions but the
+                # repo ships them in ./functions — sync so function updates deploy.
+                # Non-destructive (no --delete): never remove the runtime's own
+                # 'main' router or other server-managed files; skip the tests dir.
+                if [ -d functions ]; then
+                  mkdir -p volumes/functions
+                  rsync -a --exclude='tests' functions/ volumes/functions/ 2>/dev/null || cp -a functions/. volumes/functions/
+                fi
+                docker compose pull
+                docker compose up -d
+                docker compose run migrate
+                # Reload the edge runtime so it serves the freshly synced code;
+                # admin-proxy too so a rotated ADMIN_STATS_SECRET is re-read.
+                docker compose restart functions admin-proxy 2>/dev/null || true
+                # Vault: notify triggers authenticate to the edge function via
+                # private.get_secret('service_role_key'); media-retention uses
+                # 'project_url'. Seed both from .env IF MISSING (idempotent no-op
+                # once set) so a fresh DB is reproducible without committing secrets.
+                SRK=$(grep -E '^SERVICE_ROLE_KEY=' .env 2>/dev/null | head -1 | cut -d= -f2-)
+                AEU=$(grep -E '^API_EXTERNAL_URL=' .env 2>/dev/null | head -1 | cut -d= -f2-)
+                if [ -n "$SRK" ]; then
+                  docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=0 -v srk="$SRK" -c "SELECT vault.create_secret(:'srk','service_role_key') WHERE NOT EXISTS (SELECT 1 FROM vault.secrets WHERE name='service_role_key');" || true
+                fi
+                if [ -n "$AEU" ]; then
+                  docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=0 -v aeu="$AEU" -c "SELECT vault.create_secret(:'aeu','project_url') WHERE NOT EXISTS (SELECT 1 FROM vault.secrets WHERE name='project_url');" || true
+                fi
+              EOF
+            # Log deployment success
+            - |
+              echo << 'EOF'
+              ✓ Deployment completed successfully
+                App: v$APP_VERSION
+                Backend: v$BACKEND_VERSION
+                Landing: v$LANDING_VERSION
+              EOF
+
+          after-script:
+            # pipepush: Erfolg ODER Fehler des Deploys melden, mit Log-Link + Tail.
+            - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" always
+
+    # Auto-deploy every push to the persistent, ISOLATED staging stack (own
+    # Supabase + web root on the VPS under /home/chattr/staging — never touches
+    # prod at /home/chattr/app). Lets in-flight feature work be click-tested on
+    # staging before it reaches main/prod. build-staging builds web against the
+    # STAGING Supabase; deploy-staging ships it and runs migrations on the
+    # staging DB only. The same steps are also exposed as a manual/scheduled
+    # `custom: deploy-staging` (e.g. to push main's code to staging).
+    staging:
+      - step: *build-staging
+      - step: *deploy-staging
+
+  # Full weekly security sweep. Trigger via a Bitbucket schedule
+  # (Repo Settings → Pipelines → Schedules, or `bb schedule`): weekly, main.
+  # All four scans run in parallel; a single pipepush notification (pipeline
+  # "security-scan") summarizes the findings afterwards. govulncheck runs here
+  # (weekly) rather than per-push — its value is CVE currency, and the tiny
+  # native crypto module rarely changes between pushes.
+  custom:
+    weekly-full-security-scan:
+      - parallel:
+          - step: *security-fast
+          - step: *trivy-scan
+          - step: *govulncheck-scan
+          - step: *zap-baseline
+      - step: *pipepush-notify
+
+    # Update the persistent staging environment (build web against staging
+    # Supabase → ship to the VPS staging stack). Trigger: `bb run main
+    # --pattern deploy-staging`, or add a schedule. See docs/STAGING_SETUP.md.
+    deploy-staging:
+      - step: *build-staging
+      - step: *deploy-staging

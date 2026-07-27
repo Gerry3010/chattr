@@ -1,0 +1,267 @@
+name: chattr
+description: "A new Flutter project."
+# The following line prevents the package from being accidentally published to
+# pub.dev using `flutter pub publish`. This is preferred for private packages.
+publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+
+# The following defines the version and build number for your application.
+# A version number is three numbers separated by dots, like 1.2.43
+# followed by an optional build number separated by a +.
+# Both the version and the builder number may be overridden in flutter
+# build by specifying --build-name and --build-number, respectively.
+# In Android, build-name is used as versionName while build-number used as versionCode.
+# Read more about Android versioning at https://developer.android.com/studio/publish/versioning
+# In iOS, build-name is used as CFBundleShortVersionString while build-number is used as CFBundleVersion.
+# Read more about iOS versioning at
+# https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
+# In Windows, build-name is used as the major, minor, and patch parts
+# of the product and file versions while build-number is used as the build suffix.
+version: 1.9.2+29
+
+environment:
+  sdk: ">=3.12.0 <4.0.0"
+
+# Dependencies specify other packages that your package needs in order to work.
+# To automatically upgrade your package dependencies to the latest versions
+# consider running `flutter pub upgrade --major-versions`. Alternatively,
+# dependencies can be manually updated by changing the version numbers below to
+# the latest version available on pub.dev. To see which dependencies have newer
+# versions available, run `flutter pub outdated`.
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # The following adds the Cupertino Icons font to your application.
+  # Use with the CupertinoIcons class for iOS style icons.
+  cupertino_icons: ^1.0.8
+
+
+  # State Management (Riverpod 3 — StateNotifier/StateProvider come from the
+  # riverpod legacy library; full Notifier migration is a separate task)
+  flutter_riverpod: ^3.3.2
+  flutter_hooks: ^0.21.3
+  hooks_riverpod: ^3.3.2
+
+  # Secure Storage
+  flutter_secure_storage: ^10.0.0
+
+  # Local Database
+  sqflite: ^2.4.1
+  sqflite_common_ffi: ^2.3.0+1  # For desktop platforms
+  sqflite_common_ffi_web: ^1.1.1  # For web platform
+  path: ^1.9.0
+
+  # Encryption & Security
+  encrypt: ^5.0.3
+  local_auth: ^3.0.1
+  crypto: ^3.0.6
+  webcrypto: ^0.6.0
+  # Transparent gzip for file attachments (web-safe, no dart:io)
+  archive: ^4.0.9
+
+  # Supabase
+  supabase_flutter: ^2.3.0
+
+  # Chat UI
+  chatview: ^3.0.0
+
+  # QR
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^7.0.0
+
+  # Sharing (13.x needs win32 ^6, which stable file_picker <12 can't share)
+  share_plus: ^12.0.0
+
+  # File / image picking (avatars; media sharing) — cross-platform
+  file_picker: ^11.0.2
+
+  # In-app camera capture (attach menu; Android/iOS only)
+  image_picker: ^1.2.1
+
+  # Voice-message recording (web/desktop/mobile).
+  record: ^7.1.1
+
+  # JetBrains Mono for the terminal/Matrix theme
+  google_fonts: ^8.1.0
+
+  # SVG theme wallpapers (chat background)
+  flutter_svg: ^2.0.10+1
+
+  # iOS-style interactive edge swipe-back for pushed routes — works on
+  # web/Android too (MaterialPageRoute has no back gesture there).
+  swipeable_page_route: ^0.4.5
+
+  # Inline audio playback for voice / audio messages
+  audioplayers: ^6.1.0
+
+  # Inline video playback (cross-platform incl. Linux desktop & web)
+  media_kit: ^1.1.11
+  media_kit_video: ^2.0.1
+  media_kit_libs_video: ^1.0.5
+
+  # Temp cache dir for decrypt-to-disk media playback
+  path_provider: ^2.1.4
+
+  # Swipeable, pinch-zoom fullscreen media gallery (#109 carousel). Pure-Dart
+  # (no native → unaffected by the win32/file_picker cluster above).
+  photo_view: ^0.15.0
+
+  # Full emoji picker for custom message reactions (the "+" in the reaction
+  # sheet, beyond the 6 quick presets). Already pulled transitively by the
+  # chatview fork; promoted to a direct dep so we can import it. Version matches
+  # the fork's constraint (4.x).
+  emoji_picker_flutter: ^4.4.0
+
+  # Pre-send media editing (all platforms). Pure-Flutter image editor:
+  # crop/rotate/flip, paint incl. blur/pixelate censoring, text, filters, tune,
+  # emoji, sticker. Bytes-in/bytes-out → slots into the caption/preview stage.
+  pro_image_editor: ^13.2.0
+  # Native pre-send video cut + audio-strip (Android/iOS, no ffmpeg). Does the
+  # actual trim(start,end) + removeAudio export in the trim screen; the scrub UI
+  # + preview run on media_kit (our playback engine). Replaced video_trimmer,
+  # whose TrimViewer filmstrip failed to render on-device.
+  easy_video_editor: ^0.1.6
+
+  # Directly-imported transitive deps (web Blob/URL, XFile, chatview internals)
+  web: ^1.1.0
+  cross_file: ^0.3.4
+  chatview_utils: ^3.0.0
+
+  # Utils
+  uuid: ^4.4.0
+  # CommonMark parser for the safe markdown message subset (lib/features/markdown).
+  # Pure Dart, AST only — we render a restricted, safe subset ourselves (no raw
+  # HTML, no external images), so nothing untrusted is ever fetched/rendered.
+  markdown: ^7.3.0
+  # Compact link previews (fetch page title, open tapped links)
+  http: ^1.6.0
+  url_launcher: ^6.3.2
+  # In-app popup playback of YouTube links (official iframe API; iOS/Android/web)
+  youtube_player_iframe: ^6.0.2
+  # 9.x is the newest that still shares win32 ^5 with file_picker 11
+  # (all 10.x need win32 ^6, file_picker <12 pins ^5.9). Tested 2026-07-15:
+  # forcing win32 ^6 (dependency_overrides) resolves + our code is fine, BUT
+  # file_picker 11's bundled Windows impl won't COMPILE against win32 ^6 (removed
+  # COINIT_*/FOS_*/COMObject), breaking `flutter test`/builds. So this stays
+  # pinned until file_picker ships a win32-^6 release — not just a resolution
+  # issue. Same reason share_plus stays ^12.
+  package_info_plus: ^9.0.0
+  
+  # Code Generation
+  freezed_annotation: ^3.1.0
+  json_annotation: ^4.12.0
+
+  # Environment Variables
+  flutter_dotenv: ^6.0.1
+
+  # i18n
+  easy_localization: ^3.0.7
+  intl: ^0.20.2 # used directly by core/utils/app_time.dart (DateFormat)
+
+  # Push Notifications
+  firebase_core: ^4.3.0
+  firebase_messaging: ^16.1.0
+  flutter_local_notifications: ^22.0.1
+  # App-icon badge reset (iOS setBadgeCount / Android launcher badge). Used by
+  # FCMService.clearDeliveredNotifications() to drop the icon badge to 0.
+  app_badge_plus: ^1.2.5
+  ffi: ^2.2.0
+  cryptography: ^2.9.0
+  # SHA-512 for the identity safety-number (iterated fingerprint, audit P0-a).
+  # Already resolved transitively; declared direct since we import it now.
+  pointycastle: ^3.9.1
+  # BIP39 mnemonic for the recovery-phrase feature (lib/features/recovery).
+  # Pure Dart; deps (pointycastle/crypto) already resolved.
+  bip39: ^1.0.6
+  # UI automation (debug only, MarionetteBinding in main.dart).
+  # Pinned to the installed marionette_mcp server version.
+  marionette_flutter: 0.5.0
+  share_handler: ^0.0.25
+  # Rich clipboard read for composer paste (Ctrl/Cmd+V image/file) — Flutter's
+  # Clipboard is text-only. Native layer builds via Rust (cargokit): desktop/
+  # mobile builds need a Rust toolchain; the web CI build does not.
+  super_clipboard: ^0.9.1
+
+# Chattr maintains an AI-agent-maintained fork of chatview (Gerry3010/chatview,
+# branch `chattr` on top of upstream 3.1.0) to fix package limitations at the
+# source. Pinned to a tag; pubspec.lock records the resolved commit for
+# deterministic CI. The fork is kept current weekly by scripts/chatview-fork-sync.sh.
+# See docs / plan; upstream: SimformSolutionsPvtLtd/chatview.
+dependency_overrides:
+  chatview:
+    git:
+      url: https://github.com/Gerry3010/chatview.git
+      ref: chattr-3.1.0-p19
+  # chatview_utils is forked too (getUserFromId null-guard lives here).
+  chatview_utils:
+    git:
+      url: https://github.com/Gerry3010/chatview_utils.git
+      ref: chattr-3.1.0-p2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  # On-device/simulator tests (integration_test/). Needed for checks that
+  # only a real platform can answer — e.g. whether the iOS Keychain finds a
+  # pre-M5 key record after the accessibility/accountName hardening (M5);
+  # the mock/libsecret backends make that a no-op.
+  integration_test:
+    sdk: flutter
+
+  # The "flutter_lints" package below contains a set of recommended lints to
+  # encourage good coding practices. The lint set provided by the package is
+  # activated in the `analysis_options.yaml` file located at the root of your
+  # package. See that file for information about deactivating specific lint
+  # rules and activating additional ones.
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+  
+  # Code Generation
+  build_runner: ^2.15.0
+  freezed: ^3.2.5
+  json_serializable: ^6.14.0
+
+# For information on the generic Dart part of this file, see the
+# following page: https://dart.dev/tools/pub/pubspec
+
+# The following section is specific to Flutter packages.
+flutter:
+
+  # The following line ensures that the Material Icons font is
+  # included with your application, so that you can use the icons in
+  # the material Icons class.
+  uses-material-design: true
+
+  # To add assets to your application, add an assets section, like this:
+  assets:
+    - assets/translations/
+    - assets/wallpapers/
+    - assets/sounds/
+    - .env
+
+  # An image asset can refer to one or more resolution-specific "variants", see
+  # https://flutter.dev/to/resolution-aware-images
+
+  # For details regarding adding assets from package dependencies, see
+  # https://flutter.dev/to/asset-from-package
+
+  # To add custom fonts to your application, add a fonts section here,
+  # in this "flutter" section. Each entry in this list should have a
+  # "family" key with the font family name, and a "fonts" key with a
+  # list giving the asset and other descriptors for the font. For
+  # example:
+  # fonts:
+  #   - family: Schyler
+  #     fonts:
+  #       - asset: fonts/Schyler-Regular.ttf
+  #       - asset: fonts/Schyler-Italic.ttf
+  #         style: italic
+  #   - family: Trajan Pro
+  #     fonts:
+  #       - asset: fonts/TrajanPro.ttf
+  #       - asset: fonts/TrajanPro_Bold.ttf
+  #         weight: 700
+  #
+  # For details regarding fonts from package dependencies,
+  # see https://flutter.dev/to/font-from-package
