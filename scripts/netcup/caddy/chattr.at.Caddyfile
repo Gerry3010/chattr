@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Host Caddy site block for the chattr.at landing (Craft CMS) on nc-chattr.
+# Add to /etc/caddy/Caddyfile (or `import` it) → `sudo systemctl reload caddy`.
+#
+# TLS: chattr.at is PROXIED (orange cloud) in Cloudflare — for WAF geo-blocking
+# (RU/KP/CN/IR) + country analytics. Because CF intercepts :80/:443, Caddy can NOT
+# get a Let's Encrypt cert via HTTP-01/TLS-ALPN through the proxy → that yields a
+# 525 (SSL handshake failed). Fix = a Cloudflare Origin-CA certificate on the
+# origin + zone SSL/TLS mode "Full (strict)". The cert (15y, CF-trusted only) and
+# its key live in /etc/caddy/; generated + installed via ~/caddy-chattr-origin/
+# (key generated on the box, CSR signed in the CF dashboard — no DNS token on the
+# box). See memory `chattr-at-cloudflare-setup`.
+#
+# The CMS runs as an isolated Docker stack (~/chattr-cms) on 127.0.0.1:8109.
+# Content is CMS-managed; the landing is never indexed.
+
+chattr.at, www.chattr.at {
+	tls /etc/caddy/chattr.at.pem /etc/caddy/chattr.at.key
+	encode gzip
+	# HARD product rule: the landing is never indexed (also enforced by the
+	# noindex meta tag + CRAFT_DISALLOW_ROBOTS + /robots.txt).
+	header X-Robots-Tag "noindex, nofollow"
+	reverse_proxy 127.0.0.1:8109
+}

@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Dependabot on the public GitHub mirror. Primary CI stays on Bitbucket;
+# GitHub-native supply-chain tooling (Dependabot, CodeQL, secret scanning)
+# only runs here. Weekly, grouped, so it stays low-noise.
+version: 2
+updates:
+  # Flutter / Dart app (pubspec.yaml at the repo root).
+  - package-ecosystem: "pub"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      dart-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # MCP server (Node/TypeScript).
+  - package-ecosystem: "npm"
+    directory: "/mcp_server"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # Web crypto interop package (Node/TypeScript).
+  - package-ecosystem: "npm"
+    directory: "/web_crypto"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # Native Go crypto core (ML-KEM-768 via cloudflare/circl).
+  - package-ecosystem: "gomod"
+    directory: "/native/chattr_crypto"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+
+  # The GitHub Actions used by the security workflows themselves.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"

@@ -1,0 +1,36 @@
+; SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+; SPDX-License-Identifier: AGPL-3.0-or-later
+;
+; BIND zone file for chattr.at.
+; → Cloudflare: Add a site → chattr.at → "Import DNS records" → upload this file.
+;   (Cloudflare ignores the SOA/NS below and provides its own nameservers; it
+;    imports the A/CNAME records.) Then switch the Netcup nameservers to the two
+;    Cloudflare NS that CF shows you.
+;
+; The landing (Craft CMS) runs on nc-chattr = <prod-host>.
+; The app/api currently stay on chattr.geraldhofbauer.net — the commented
+; records at the bottom are for the LATER chattr.at cutover of the clients.
+
+$ORIGIN chattr.at.
+$TTL 3600
+
+@   IN  SOA ns.chattr.at. hostmaster.chattr.at. (
+            2026072801 ; serial (YYYYMMDDnn)
+            7200       ; refresh
+            3600       ; retry
+            1209600    ; expire
+            3600 )     ; minimum
+
+; Nameservers — PLACEHOLDERS. Cloudflare assigns the real pair when you add the
+; zone; set those two at Netcup. (Left here only to keep the file a valid zone.)
+@   IN  NS  ns1.example-cloudflare.com.
+@   IN  NS  ns2.example-cloudflare.com.
+
+; ── Landing: chattr.at + www → Craft CMS on nc-chattr ──────────────────────
+@       IN  A       <prod-host>
+www     IN  CNAME   chattr.at.
+
+; ── (optional, later) client cutover from chattr.geraldhofbauer.net ────────
+; Uncomment when you move the app/api over to the chattr.at domain:
+;api    IN  A       <prod-host>
+;app    IN  A       <prod-host>

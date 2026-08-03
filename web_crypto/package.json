@@ -1,0 +1,18 @@
+{
+  "name": "chattr-web-crypto",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bundles the hybrid KEM (X25519 + ML-KEM-768) for the Flutter web app (dart:js_interop)",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild entry.mjs --bundle --format=iife --minify --outfile=../web/chattr_crypto.js",
+    "test": "node test.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.8.1",
+    "mlkem": "^2.7.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

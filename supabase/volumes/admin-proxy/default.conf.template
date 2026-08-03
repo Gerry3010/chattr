@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# admin-proxy: serves the static Chattr admin console and proxies the
+# admin-stats edge function to Kong on the internal Docker network, injecting
+# the gate secret SERVER-SIDE. The browser fetches same-origin with no
+# Authorization header; this proxy adds it. Only ${ADMIN_STATS_SECRET} is
+# substituted at startup (NGINX_ENVSUBST_FILTER) — nginx's own $vars survive.
+
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/admin;
+    index index.html;
+
+    # Never let the panel be framed / sniffed.
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+
+    # Static admin console (SPA-ish: fall back to index.html).
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Secret-injecting proxy to the admin-stats edge function via Kong.
+    # The bearer is added here, on the server — it is never sent by the browser.
+    # Resolve `kong` at request time via Docker's embedded DNS (127.0.0.11) and
+    # a variable upstream, so a kong restart (new container IP) can't leave us
+    # pinned to a stale address or crash on startup before kong is up.
+    location /functions/ {
+        resolver 127.0.0.11 valid=30s ipv6=off;
+        set $kong_upstream kong;
+        proxy_pass http://$kong_upstream:8000$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Authorization "Bearer ${ADMIN_STATS_SECRET}";
+    }
+}

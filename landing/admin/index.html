@@ -1,0 +1,767 @@
+<!doctype html>
+<!--
+  SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+  SPDX-License-Identifier: AGPL-3.0-or-later
+
+  Chattr internal admin console. Static page served behind Caddy basic_auth on
+  admin.chattr.* ; it calls the `admin-stats` edge function with a shared secret
+  the operator pastes once (stored in sessionStorage). Content-blind by design:
+  it only ever renders metadata + whatever a participant voluntarily revealed.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Chattr Admin Console</title>
+<style>
+  :root{
+    --bg:#12161F; --panel:#1A1F2E; --panel-2:#222839; --panel-3:#2A3145;
+    --border:#2C3346; --border-2:#37405A;
+    --text:#E4E9F1; --dim:#8B97AD; --faint:#5A6478;
+    --teal:#5FA8BE; --grid:rgba(226,232,240,.055);
+    --coral:#E8836B; --amber:#E8B06A; --ok:#4FB894;
+    --coral-bg:rgba(232,131,107,.12); --amber-bg:rgba(232,176,106,.12); --ok-bg:rgba(79,184,148,.12);
+    --c1:#2C99C4; --c2:#9E6BEA; --c3:#469E5E; --c4:#CA639A;
+    --radius:3px;
+    --mono:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  :root[data-theme="light"]{
+    --bg:#EEF1F6; --panel:#FFFFFF; --panel-2:#F4F6FA; --panel-3:#EBEFF5;
+    --border:#DBE1EC; --border-2:#C7D0DE; --text:#26303F; --dim:#5C6779; --faint:#909BAC;
+    --teal:#2F6E88; --grid:rgba(40,50,70,.06);
+    --coral:#D2664C; --amber:#B9843A; --ok:#2E9070;
+    --coral-bg:rgba(210,102,76,.10); --amber-bg:rgba(185,132,58,.10); --ok-bg:rgba(46,144,112,.10);
+    --c1:#1F7FA8; --c2:#7B4FCC; --c3:#2F8049; --c4:#AF4E86;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px;line-height:1.45;-webkit-font-smoothing:antialiased;}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums;}
+  ::selection{background:rgba(95,168,190,.28)}
+  a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--teal);outline-offset:2px;}
+
+  /* ---- connect gate ---- */
+  .gate-screen{position:fixed;inset:0;display:grid;place-items:center;background:var(--bg);z-index:50;}
+  .gate-card{width:360px;max-width:92vw;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:22px;}
+  .gate-card h1{font-size:15px;margin:0 0 4px;display:flex;align-items:center;gap:9px;}
+  .gate-card p{color:var(--dim);font-size:12px;margin:0 0 16px;}
+  .gate-card label{display:block;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);margin:12px 0 5px;}
+  .gate-card input{width:100%;background:var(--panel-2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:var(--mono);font-size:12px;padding:8px 10px;}
+  .gate-card button{margin-top:16px;width:100%;background:var(--teal);color:#06121a;border:none;border-radius:var(--radius);padding:9px;font-weight:600;font-size:13px;cursor:pointer;font-family:var(--sans);}
+  .gate-card .err{color:var(--coral);font-size:11.5px;margin-top:10px;min-height:14px;}
+
+  /* ---- shell ---- */
+  .app{display:grid;grid-template-columns:212px 1fr;min-height:100vh;}
+  .side{background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;}
+  .brand{display:flex;align-items:center;gap:9px;padding:15px 16px;border-bottom:1px solid var(--border);}
+  .brand .logo{width:22px;height:22px;border:1px solid var(--teal);border-radius:var(--radius);display:grid;place-items:center;color:var(--teal);font-size:12px;}
+  .brand b{font-size:13px;letter-spacing:.02em;font-weight:600;}
+  .brand span{font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:.08em;text-transform:uppercase;}
+  nav{padding:8px;display:flex;flex-direction:column;gap:1px;}
+  nav a{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:var(--radius);color:var(--dim);text-decoration:none;font-size:12.5px;border:1px solid transparent;cursor:pointer;}
+  nav a .ic{width:15px;text-align:center;opacity:.85;font-size:12px;}
+  nav a:hover{background:var(--panel-2);color:var(--text);}
+  nav a.active{background:var(--panel-2);color:var(--text);border-color:var(--border);box-shadow:inset 2px 0 0 var(--teal);}
+  nav a .badge{margin-left:auto;font-family:var(--mono);font-size:10px;background:var(--coral-bg);color:var(--coral);padding:1px 5px;border-radius:20px;border:1px solid rgba(232,131,107,.3);}
+  .side-foot{margin-top:auto;padding:11px 14px;border-top:1px solid var(--border);font-family:var(--mono);font-size:10.5px;color:var(--faint);display:flex;align-items:center;gap:6px;}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-bg);}
+
+  .main{min-width:0;display:flex;flex-direction:column;}
+  .top{display:flex;align-items:center;gap:12px;padding:11px 20px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:5;}
+  .crumb{font-size:12.5px;color:var(--dim);} .crumb b{color:var(--text);font-weight:600;}
+  .top .spacer{flex:1}
+  .chip{font-family:var(--mono);font-size:10.5px;padding:2px 9px;border-radius:20px;display:flex;align-items:center;gap:6px;border:1px solid var(--border-2);background:var(--panel-2);color:var(--dim);}
+  .chip.ok{color:var(--ok);border-color:rgba(79,184,148,.32);background:var(--ok-bg);}
+  .chip.seal{color:var(--teal);}
+  .btn-sm{border:1px solid var(--border);background:var(--panel-2);color:var(--dim);border-radius:var(--radius);padding:4px 9px;font-size:11px;cursor:pointer;font-family:var(--mono);}
+  .btn-sm:hover{color:var(--text);border-color:var(--border-2);}
+  .segmented{display:flex;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;}
+  .segmented button{border:none;background:var(--panel-2);color:var(--dim);padding:4px 11px;font-size:11px;cursor:pointer;font-family:var(--mono);}
+  .segmented button.on{background:var(--panel-3);color:var(--text);}
+
+  .body{padding:20px;display:flex;flex-direction:column;gap:16px;max-width:1180px;}
+  .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;}
+  .kpi{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:12px 13px;display:flex;flex-direction:column;gap:7px;min-width:0;}
+  .kpi .k-label{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--dim);}
+  .kpi .k-val{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:23px;font-weight:600;letter-spacing:-.01em;line-height:1;}
+  .kpi .k-sub{font-family:var(--mono);font-size:10.5px;color:var(--faint);}
+  .kpi.alert{border-color:rgba(232,131,107,.4);} .kpi.alert .k-val{color:var(--coral);}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  .grid3{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:12px;}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);display:flex;flex-direction:column;min-width:0;}
+  .p-head{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--border);}
+  .p-head h3{margin:0;font-size:12px;font-weight:600;letter-spacing:.02em;}
+  .p-head .hint{font-family:var(--mono);font-size:10px;color:var(--faint);margin-left:auto;}
+  .p-body{padding:14px;}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;padding:0 14px 12px;font-size:11px;color:var(--dim);}
+  .legend span{display:flex;align-items:center;gap:6px;} .legend i{width:9px;height:9px;border-radius:2px;display:inline-block;}
+
+  .media-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);border-bottom:1px solid var(--border);}
+  .media-stats>div{background:var(--panel);padding:12px 14px;}
+  .ms-label{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);}
+  .ms-val{font-family:var(--mono);font-size:18px;font-weight:600;margin-top:4px;} .ms-val.warn{color:var(--amber);}
+  .ms-sub{font-family:var(--mono);font-size:10px;color:var(--faint);margin-top:2px;}
+  .kindbar{display:flex;flex-direction:column;gap:9px;padding:14px;}
+  .kindrow{display:grid;grid-template-columns:64px 1fr 66px;align-items:center;gap:10px;font-size:11.5px;}
+  .kindrow .kname{color:var(--dim);} .kindrow .ktrack{height:8px;background:var(--panel-3);border-radius:2px;overflow:hidden;}
+  .kindrow .kfill{height:100%;border-radius:2px;} .kindrow .ksize{font-family:var(--mono);text-align:right;color:var(--faint);font-size:10.5px;}
+
+  table{width:100%;border-collapse:collapse;font-size:12px;}
+  thead th{text-align:left;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:600;padding:9px 14px;border-bottom:1px solid var(--border);}
+  tbody td{padding:11px 14px;border-bottom:1px solid var(--border);vertical-align:middle;}
+  tbody tr:last-child td{border-bottom:none;} tbody tr:hover{background:var(--panel-2);}
+  .fp{font-family:var(--mono);font-size:11px;color:var(--text);background:var(--panel-3);border:1px solid var(--border);border-radius:var(--radius);padding:2px 7px;display:inline-flex;align-items:center;gap:5px;}
+  .fp .k{color:var(--teal);}
+  .subj .gname{font-weight:600;} .subj .meta{font-family:var(--mono);font-size:10px;color:var(--faint);}
+  .cipher{font-family:var(--mono);font-size:11px;letter-spacing:1px;color:var(--faint);background:repeating-linear-gradient(45deg,var(--panel-3),var(--panel-3) 6px,transparent 6px,transparent 12px);border:1px dashed var(--border-2);border-radius:var(--radius);padding:4px 9px;display:inline-flex;align-items:center;gap:8px;user-select:none;}
+  .revealed{font-family:var(--mono);font-size:11.5px;color:var(--text);background:var(--panel-3);border:1px solid rgba(79,184,148,.35);border-radius:var(--radius);padding:4px 9px;display:inline-flex;align-items:center;gap:8px;}
+  .verified{color:var(--ok);font-family:var(--mono);font-size:10px;display:inline-flex;align-items:center;gap:4px;border:1px solid rgba(79,184,148,.35);background:var(--ok-bg);border-radius:20px;padding:1px 7px;}
+  .gate{font-family:var(--mono);font-size:10.5px;display:inline-flex;align-items:center;gap:7px;}
+  .gate .bar{width:52px;height:5px;background:var(--panel-3);border-radius:3px;overflow:hidden;border:1px solid var(--border);}
+  .gate .bar i{display:block;height:100%;background:var(--teal);} .gate.met{color:var(--ok);} .gate.met .bar i{background:var(--ok);}
+  .pill{font-size:10.5px;font-family:var(--mono);padding:2px 8px;border-radius:20px;border:1px solid transparent;display:inline-block;}
+  .pill.open{color:var(--amber);background:var(--amber-bg);border-color:rgba(232,176,106,.3);}
+  .pill.upheld{color:var(--coral);background:var(--coral-bg);border-color:rgba(232,131,107,.3);}
+  .pill.dismissed,.pill.watch{color:var(--dim);background:var(--panel-3);border-color:var(--border);}
+  .act{display:flex;gap:6px;justify-content:flex-end;}
+  .btn{font-family:var(--mono);font-size:10.5px;padding:3px 9px;border-radius:var(--radius);cursor:pointer;border:1px solid var(--border-2);background:var(--panel-2);color:var(--dim);}
+  .btn:hover{color:var(--text);border-color:var(--dim);}
+  .btn.danger{color:var(--coral);border-color:rgba(232,131,107,.4);background:var(--coral-bg);}
+  .btn.danger:hover{border-color:var(--coral);}
+  .note{font-size:11px;color:var(--faint);line-height:1.7;border:1px dashed var(--border-2);border-radius:var(--radius);padding:9px 13px;background:var(--panel);}
+  .note .num{color:var(--dim);padding:1px 5px;background:var(--panel-3);border:1px solid var(--border);border-radius:2px;white-space:nowrap;}
+  .empty{color:var(--faint);font-family:var(--mono);font-size:11.5px;padding:22px 14px;text-align:center;}
+
+  /* ---- forms / settings / users ---- */
+  .inp{background:var(--panel-2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:var(--mono);font-size:12px;padding:6px 9px;}
+  .inp:focus{outline:none;border-color:var(--teal);}
+  select.inp{font-family:var(--sans);}
+  .frm{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:12px 14px;border-top:1px solid var(--border);}
+  .frm .grow{flex:1;min-width:120px;}
+  .searchbar{display:flex;gap:8px;padding:14px;flex-wrap:wrap;}
+  .btn.primary{background:var(--teal);color:#06121a;border-color:var(--teal);font-weight:600;}
+  .btn.primary:hover{color:#06121a;filter:brightness(1.05);}
+  .toggle.on{color:var(--ok);border-color:rgba(79,184,148,.4);background:var(--ok-bg);}
+  .mut{color:var(--dim);font-size:11px;}
+  .tag{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--border);border-radius:20px;padding:1px 7px;}
+  .stack{display:flex;flex-direction:column;gap:16px;}
+  .role-pill{font-family:var(--mono);font-size:10px;padding:1px 7px;border-radius:20px;border:1px solid var(--border);}
+  .role-pill.admin{color:var(--teal);border-color:rgba(95,168,190,.4);}
+  .diag{color:var(--faint);}
+
+  @media (max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr);}.grid2,.grid3{grid-template-columns:1fr;}}
+  @media (prefers-reduced-motion:no-preference){.cipher,.revealed{transition:opacity .3s ease;}}
+</style>
+</head>
+<body>
+
+<!-- ============ CONNECT GATE ============ -->
+<div class="gate-screen" id="gate">
+  <div class="gate-card">
+    <h1>🛡️ Chattr Admin Console</h1>
+    <p>Bound mode failed — this page isn't being served by the admin-proxy. This is the dev fallback: point at a remote API and enter the secret (kept in this tab only, sessionStorage).</p>
+    <label for="apiBase">API base</label>
+    <input id="apiBase" spellcheck="false" value="https://api.chattr.geraldhofbauer.net">
+    <label for="secret">Admin secret</label>
+    <input id="secret" type="password" spellcheck="false" placeholder="ADMIN_STATS_SECRET">
+    <button id="connectBtn">Connect</button>
+    <div class="err" id="gateErr"></div>
+  </div>
+</div>
+
+<!-- ============ OPERATOR LOGIN ============ -->
+<div class="gate-screen" id="login" style="display:none">
+  <div class="gate-card">
+    <h1>🛡️ Chattr Admin — Sign in</h1>
+    <p>This console requires an operator login. You're already past the network gate (mTLS + basic&nbsp;auth); enter your operator credentials.</p>
+    <label for="lgUser">Username</label>
+    <input id="lgUser" spellcheck="false" autocomplete="username">
+    <label for="lgPass">Password</label>
+    <input id="lgPass" type="password" autocomplete="current-password">
+    <button id="loginBtn">Sign in</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<div class="app" id="app" style="display:none">
+  <aside class="side">
+    <div class="brand"><div class="logo">▚</div><div><b>Chattr</b><br><span>console</span></div></div>
+    <nav id="nav">
+      <a data-view="overview" class="active"><span class="ic">▤</span><span>Overview</span></a>
+      <a data-view="reports"><span class="ic">⚑</span><span>Reports</span><span class="badge" id="navReports" style="display:none">0</span></a>
+      <a data-view="signals"><span class="ic">◈</span><span>Signals</span></a>
+      <a data-view="users"><span class="ic">◉</span><span>Users</span></a>
+      <a data-view="settings" id="navSettings" style="display:none"><span class="ic">⚙</span><span>Settings</span></a>
+    </nav>
+    <div class="side-foot"><span class="dot"></span><span id="footHost">—</span></div>
+  </aside>
+
+  <div class="main">
+    <header class="top">
+      <div class="crumb" id="crumb">admin / <b>overview</b></div>
+      <div class="spacer"></div>
+      <div class="segmented" id="bucketSeg">
+        <button data-b="day" class="on">day</button><button data-b="week">week</button><button data-b="month">month</button>
+      </div>
+      <div class="chip ok" id="envChip"><span class="dot"></span>live</div>
+      <div class="chip seal">🔒 content-blind</div>
+      <button class="btn-sm" id="themeBtn">◐ theme</button>
+      <button class="btn-sm" id="reloadBtn">↻</button>
+      <button class="btn-sm" id="logoutBtn">exit</button>
+    </header>
+
+    <div class="body" id="content"><div class="empty">Loading…</div></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var SS = window.sessionStorage;
+  var state = { base:"", secret:"", bucket:"day", data:null };
+
+  var $ = function(id){ return document.getElementById(id); };
+  var esc = function(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); };
+  var nf = function(n){ return (n==null?0:Number(n)).toLocaleString("en-US"); };
+  function bytes(n){ n=Number(n||0); if(n<1024)return n+" B"; var u=["KB","MB","GB","TB"],i=-1;
+    do{ n/=1024; i++; }while(n>=1024&&i<u.length-1); return n.toFixed(n<10?1:0)+" "+u[i]; }
+
+  /* ---------- API ----------
+     Default (production): same-origin, no secret in the browser — the
+     admin-proxy sidecar in the Supabase stack injects the bearer server-side.
+     Fallback (dev / remote): a base URL + secret entered in the gate, sent as
+     an Authorization header from this tab only. */
+  function api(action, opts){
+    opts = opts || {};
+    var base = state.base ? state.base.replace(/\/+$/,"") : "";  // "" → same-origin
+    var url = base + "/functions/v1/admin-stats?action=" + action;
+    if(opts.query) url += "&" + opts.query;
+    var headers = { "Content-Type":"application/json" };
+    if(state.secret) headers["Authorization"] = "Bearer " + state.secret;  // else proxy injects
+    if(state.session) headers["X-Admin-Session"] = state.session;           // operator session
+    return fetch(url, {
+      method: opts.method || "GET",
+      headers: headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    }).then(function(r){
+      if(!r.ok) return r.json().catch(function(){return {};}).then(function(e){
+        var err=new Error((e && e.error) || ("HTTP "+r.status)); err.status=r.status; throw err; });
+      return r.json();
+    });
+  }
+
+  /* ---------- charts (flat SVG from data) ---------- */
+  function lineChart(series, color){
+    color = color || "var(--c1)";
+    if(!series.length) return '<div class="empty">no data</div>';
+    var vals = series.map(function(p){return Number(p.value)||0;});
+    var max = Math.max.apply(null, vals.concat([1])), n=series.length, W=520,H=150;
+    var pts = vals.map(function(v,i){ var x=n<2?W:i*(W/(n-1)); var y=H-12-(v/max)*(H-30); return [x,y]; });
+    var d = pts.map(function(p,i){return (i?"L":"M")+p[0].toFixed(1)+","+p[1].toFixed(1);}).join(" ");
+    var last = pts[pts.length-1];
+    var grid = [37,75,113].map(function(y){return '<line x1="0" y1="'+y+'" x2="520" y2="'+y+'" stroke="var(--grid)"/>';}).join("");
+    return '<svg viewBox="0 0 520 150" width="100%" height="150" preserveAspectRatio="none">'+grid+
+      '<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="2" stroke-linejoin="round"/>'+
+      '<circle cx="'+last[0].toFixed(1)+'" cy="'+last[1].toFixed(1)+'" r="3.5" fill="'+color+'"/></svg>';
+  }
+  function barChart(series){
+    if(!series.length) return '<div class="empty">no data</div>';
+    var vals = series.map(function(p){return Number(p.value)||0;});
+    var max = Math.max.apply(null, vals.concat([1])), n=series.length, W=340,H=130, bw=Math.max(4,Math.min(18,(W-8)/n-6));
+    var bars = vals.map(function(v,i){ var h=(v/max)*(H-20); var x=6+i*((W-12)/n); var y=H-5-h;
+      return '<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+h.toFixed(1)+'" rx="2" fill="var(--c1)"/>'; }).join("");
+    return '<svg viewBox="0 0 340 140" width="100%" height="140"><line x1="0" y1="'+(H-5)+'" x2="340" y2="'+(H-5)+'" stroke="var(--border)"/>'+bars+'</svg>';
+  }
+  function stackedChats(rows){
+    // rows: {bucket, kind:'direct'|'group', value}
+    var byBucket = {};
+    rows.forEach(function(r){ (byBucket[r.bucket]=byBucket[r.bucket]||{}); byBucket[r.bucket][r.kind]=Number(r.value)||0; });
+    var keys = Object.keys(byBucket).sort();
+    if(!keys.length) return '<div class="empty">no data</div>';
+    var totals = keys.map(function(k){return (byBucket[k].direct||0)+(byBucket[k].group||0);});
+    var max = Math.max.apply(null, totals.concat([1])), n=keys.length, W=300,H=110, bw=Math.max(6,Math.min(20,(W-20)/n-6));
+    var g = keys.map(function(k,i){ var b=byBucket[k]; var d=b.direct||0,gr=b.group||0;
+      var x=15+i*((W-20)/n); var hd=(d/max)*(H-14), hg=(gr/max)*(H-14);
+      var yd=H-hd, yg=yd-hg-2;
+      return '<rect x="'+x.toFixed(1)+'" y="'+yd.toFixed(1)+'" width="'+bw+'" height="'+hd.toFixed(1)+'" rx="2" fill="var(--c1)"/>'+
+             (gr?'<rect x="'+x.toFixed(1)+'" y="'+yg.toFixed(1)+'" width="'+bw+'" height="'+hg.toFixed(1)+'" rx="2" fill="var(--c2)"/>':''); }).join("");
+    return '<svg viewBox="0 0 300 120" width="100%" height="120">'+g+'</svg>';
+  }
+
+  function kv(list, key){ var o={}; (list||[]).forEach(function(r){o[r[key||"metric"]]=Number(r.value)||0;}); return o; }
+
+  /* ---------- overview render ---------- */
+  function renderOverview(){
+    var d = state.data; if(!d){ return; }
+    var trust = kv(d.trustAdoption), active = kv(d.activeUsers);
+    var openReports = (d.reports||[]).length;
+    setBadge(openReports);
+    var media = (d.media||{});
+    var totals = media.totals||{blob_count:0,total_bytes:0};
+    var pending = media.pending||{blob_count:0,total_bytes:0};
+
+    var chatsTotal=0, grp=0; (d.chats||[]).forEach(function(r){ chatsTotal+=Number(r.value)||0; if(r.kind==="group")grp+=Number(r.value)||0; });
+    var msgToday = (d.messagesDaily||[]).slice(-1)[0]; msgToday = msgToday?Number(msgToday.value)||0:0;
+
+    var identityPct = trust.profiles_total ? Math.round(100*trust.profiles_with_identity_key/trust.profiles_total) : 0;
+    var prekeyPct = trust.members_total ? Math.round(100*trust.members_with_prekeys/trust.members_total) : 0;
+
+    var html = "";
+    /* KPIs */
+    html += '<section class="kpis">'+
+      kpi("Users", nf(active.users_total||trust.profiles_total), "identity "+identityPct+"%")+
+      kpi("Active · DAU", nf(active.dau), "WAU "+nf(active.wau)+" · MAU "+nf(active.mau))+
+      kpi("New chats ("+esc(d.bucket)+")", nf(chatsTotal), nf(chatsTotal-grp)+" direct · "+nf(grp)+" grp")+
+      kpi("Messages / day", nf(msgToday), "from metrics_daily")+
+      kpi("Media", bytes(totals.total_bytes), nf(totals.blob_count)+" blobs · "+nf(pending.blob_count)+" pending")+
+      kpi("Reports open", nf(openReports), "moderation queue", openReports>0)+
+    '</section>';
+
+    /* charts row 1 */
+    html += '<section class="grid2">'+
+      panel("Signups", d.bucket, lineChart(d.signups))+
+      panel("Messages / day", "metrics_daily", barChart((d.messagesDaily||[]).map(function(x){return {value:x.value};})))+
+    '</section>';
+
+    /* charts row 2 */
+    html += '<section class="grid3">'+
+      panel("New chats", "1:1 vs group",
+        '<div class="legend" style="padding:0 0 10px"><span><i style="background:var(--c1)"></i>Direct</span><span><i style="background:var(--c2)"></i>Group</span></div>'+
+        stackedChats(d.chats||[]))+
+      panel("Trust adoption", "identity + prekeys",
+        adoptRow("Identity key registered", identityPct)+adoptRow("Members with prekeys", prekeyPct))+
+      panel("Blocks", d.bucket, barChart((d.blocks||[]).map(function(x){return {value:x.value};})))+
+    '</section>';
+
+    /* media + platform */
+    html += '<section class="grid2">'+mediaPanel(media)+platformPanel(d.platformMix||[])+'</section>';
+
+    /* report queue */
+    html += reportQueue(d.reports||[]);
+    /* signals */
+    html += signalsPanel(d.signals||[]);
+
+    html += '<div class="note">🔒 This console never decrypts a message. A flag carries only <span class="num" style="color:var(--dim)">{message_id, chat_id, reason}</span>; content appears only when <span class="num" style="color:var(--dim)">min(3,N)</span> independent reporters corroborate, or the accused self-reveals with a signed proof of authorship.</div>';
+
+    $("content").innerHTML = html;
+  }
+
+  function kpi(label,val,sub,alert){ return '<div class="kpi'+(alert?" alert":"")+'"><div class="k-label">'+esc(label)+'</div><div class="k-val">'+val+'</div><div class="k-sub">'+esc(sub)+'</div></div>'; }
+  function panel(title,hint,inner){ return '<div class="panel"><div class="p-head"><h3>'+esc(title)+'</h3><span class="hint">'+esc(hint)+'</span></div><div class="p-body">'+inner+'</div></div>'; }
+  function adoptRow(label,pct){ return '<div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-bottom:5px"><span>'+esc(label)+'</span><span class="num" style="color:var(--text)">'+pct+'%</span></div><div style="height:8px;background:var(--panel-3);border-radius:2px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:var(--c3);border-radius:2px"></div></div></div>'; }
+
+  function mediaPanel(m){
+    var t=m.totals||{}, p=m.pending||{}, u=m.unreferenced||{}, kinds=m.byKind||[];
+    var maxK=Math.max.apply(null,kinds.map(function(k){return Number(k.total_bytes)||0;}).concat([1]));
+    var colors={image:"var(--c1)",video:"var(--c2)",audio:"var(--c3)",other:"var(--c4)",unknown:"var(--faint)"};
+    var rows=kinds.map(function(k){ var b=Number(k.total_bytes)||0; var w=Math.round(100*b/maxK);
+      return '<div class="kindrow"><span class="kname">'+esc(k.kind)+'</span><span class="ktrack"><span class="kfill" style="width:'+w+'%;background:'+(colors[k.kind]||"var(--faint)")+'"></span></span><span class="ksize">'+bytes(b)+'</span></div>'; }).join("")
+      || '<div class="empty">no media</div>';
+    return '<div class="panel"><div class="p-head"><h3>Media storage</h3><span class="hint">private bucket · content-blind</span></div>'+
+      '<div class="media-stats">'+
+        '<div><div class="ms-label">Blobs</div><div class="ms-val num">'+nf(t.blob_count)+'</div><div class="ms-sub">on server</div></div>'+
+        '<div><div class="ms-label">Storage</div><div class="ms-val num">'+bytes(t.total_bytes)+'</div><div class="ms-sub">'+nf(u.blob_count)+' reap-due</div></div>'+
+        '<div><div class="ms-label">Not fetched</div><div class="ms-val num warn">'+nf(p.blob_count)+'</div><div class="ms-sub">'+bytes(p.total_bytes)+' pending</div></div>'+
+      '</div><div class="kindbar">'+rows+'</div></div>';
+  }
+  function platformPanel(mix){
+    var total=mix.reduce(function(a,r){return a+(Number(r.value)||0);},0)||1;
+    var col={android:"var(--c1)",ios:"var(--c2)",web:"var(--c3)"};
+    var legend=mix.map(function(r){ var pct=Math.round(100*(Number(r.value)||0)/total);
+      return '<span style="display:flex;align-items:center;gap:8px"><i style="width:9px;height:9px;border-radius:2px;background:'+(col[r.platform]||"var(--faint)")+'"></i>'+esc(r.platform)+' <b class="num" style="margin-left:auto;padding-left:16px">'+pct+'%</b></span>'; }).join("")
+      || '<div class="empty">no devices</div>';
+    return '<div class="panel"><div class="p-head"><h3>Platform mix</h3><span class="hint">device tokens</span></div><div class="p-body" style="display:flex;flex-direction:column;gap:9px;font-size:12px">'+legend+'</div></div>';
+  }
+
+  function fpChip(hex){ if(!hex) return '<span class="fp"><span class="k">⚿</span>—</span>';
+    var s=String(hex).replace(/[^0-9a-f]/gi,"").slice(0,8)||"unknown";
+    return '<span class="fp"><span class="k">⚿</span>'+esc(s.replace(/(.{4})/,"$1·"))+'</span>'; }
+
+  function reportQueue(reports){
+    var rows = reports.map(function(r){
+      var subj, evidence, gate;
+      if(r.subject_type==="group"){
+        subj='<div class="subj"><span class="gname">'+esc(r.group_name||"(unnamed group)")+'</span><div class="meta">group · '+((r.group_admins||[]).length)+' admins</div></div>';
+        evidence='<span class="revealed">◈ name is plaintext metadata — visible</span>';
+        gate='<span class="gate met">n/a — name-based</span>';
+      } else {
+        subj='<div class="subj">'+fpChip(r.reported_identity_key||r.reported_user_id)+'<div class="meta">'+(r.message_id?"message":"user")+'</div></div>';
+        if(r.revealed_text){
+          var v = r.revealed_by==="sender" ? '<span class="verified">⚿ authorship verified</span>' : '<span class="verified">recipient-revealed</span>';
+          evidence='<span class="revealed">'+v+esc(r.revealed_text)+'</span>';
+        } else {
+          evidence='<span class="cipher"><span>🔒</span>▓▓▓▓▓ ▓▓▓ ▓▓▓▓▓▓ sealed</span>';
+        }
+        if(r.message_id){
+          var open=r.gate_open; var reporters=Number(r.distinct_reporters)||0;
+          gate='<span class="gate'+(open?" met":"")+'"><span class="bar"><i style="width:'+Math.min(100,reporters*34)+'%"></i></span>'+reporters+(open?" · unlocked":" reporters")+'</span>';
+        } else {
+          gate='<span class="gate">'+(Number(r.distinct_reporters)||0)+' reporters</span>';
+        }
+      }
+      var actions = r.subject_type==="group"
+        ? '<button class="btn danger" data-act="ban" data-type="group" data-id="'+esc(r.reported_chat_id)+'">Ban group</button>'
+        : '<button class="btn danger" data-act="ban" data-type="user" data-id="'+esc(r.reported_user_id)+'">Ban user</button>';
+      actions = '<button class="btn" data-act="resolve" data-res="upheld" data-id="'+esc(r.id)+'">Uphold</button>'+
+                '<button class="btn" data-act="resolve" data-res="dismissed" data-id="'+esc(r.id)+'">Dismiss</button>'+
+                '<button class="btn" data-act="resolve" data-res="unfounded" data-id="'+esc(r.id)+'">False</button>'+actions;
+      return '<tr><td>'+subj+'</td><td>'+esc(r.reason)+'</td><td>'+evidence+'</td><td>'+gate+'</td><td><span class="pill '+esc(r.resolution)+'">'+esc(r.resolution)+'</span></td><td><div class="act">'+actions+'</div></td></tr>';
+    }).join("");
+    if(!rows) rows='<tr><td colspan="6"><div class="empty">no open reports 🎉</div></td></tr>';
+    return '<section class="panel"><div class="p-head"><h3>Report queue</h3><span class="pill open">'+reports.length+' open</span><span class="hint">content stays sealed until corroborated or self-revealed · no backdoor</span></div><div style="overflow-x:auto"><table><thead><tr><th>Subject</th><th>Reason</th><th>Evidence</th><th>Content gate</th><th>Status</th><th style="text-align:right">Action</th></tr></thead><tbody>'+rows+'</tbody></table></div></section>';
+  }
+
+  function signalsPanel(signals){
+    var rows = signals.map(function(s){
+      return '<tr><td><span class="pill watch">'+esc(s.kind)+'</span></td><td class="subj"><span class="gname">'+esc(s.label||"—")+'</span></td><td>'+esc(s.detail)+'</td><td class="num" style="text-align:right;color:var(--coral)">'+nf(s.score)+'</td></tr>';
+    }).join("");
+    if(!rows) rows='<tr><td colspan="4"><div class="empty">no signals</div></td></tr>';
+    return '<section class="panel"><div class="p-head"><h3>Abuse &amp; name signals</h3><span class="hint">mass-block + watchlist on plaintext identifiers only — never messages</span></div><div style="overflow-x:auto"><table><thead><tr><th>Kind</th><th>Subject</th><th>Detail</th><th style="text-align:right">Score</th></tr></thead><tbody>'+rows+'</tbody></table></div></section>';
+  }
+
+  /* ---------- Users / Enforcement view ---------- */
+  function tableSection(title, cols, rowsHtml, hint){
+    var head = cols.map(function(c,i){ return '<th'+(i===cols.length-1?' style="text-align:right"':'')+'>'+esc(c)+'</th>'; }).join("");
+    if(!rowsHtml) rowsHtml='<tr><td colspan="'+cols.length+'"><div class="empty">none</div></td></tr>';
+    return '<section class="panel"><div class="p-head"><h3>'+esc(title)+'</h3>'+(hint?'<span class="hint">'+esc(hint)+'</span>':'')+
+      '</div><div style="overflow-x:auto"><table><thead><tr>'+head+'</tr></thead><tbody>'+rowsHtml+'</tbody></table></div></section>';
+  }
+  function renderUsers(){
+    var e = state.viewData || {bannedUsers:[],bannedChats:[],flaggingRevoked:[]};
+    var html = '<section class="panel"><div class="p-head"><h3>Direct enforcement</h3><span class="hint">act by id — out-of-band, no report needed</span></div>'+
+      '<div class="searchbar"><input class="inp grow" id="entId" placeholder="user or group UUID" style="font-family:var(--mono)">'+
+      '<select class="inp" id="entType"><option value="user">user</option><option value="group">group</option></select>'+
+      '<button class="btn danger" data-act="ent-ban">Ban</button>'+
+      '<button class="btn" data-act="ent-unban">Unban</button></div></section>';
+
+    html += tableSection("Banned users", ["User","Banned","Action"], e.bannedUsers.map(function(u){
+      return '<tr><td>'+fpChip(u.user_id)+' <span class="mut">'+esc(u.username||"")+'</span></td>'+
+        '<td class="num">'+esc((u.banned_at||"").slice(0,10))+'</td>'+
+        '<td class="act"><button class="btn" data-act="unban" data-type="user" data-id="'+esc(u.user_id)+'">Unban</button></td></tr>';
+    }).join(""));
+
+    html += tableSection("Banned groups", ["Group","Banned","Action"], e.bannedChats.map(function(c){
+      return '<tr><td class="subj"><span class="gname">'+esc(c.name||"(unnamed)")+'</span> <span class="meta">'+esc(c.chat_id)+'</span></td>'+
+        '<td class="num">'+esc((c.banned_at||"").slice(0,10))+'</td>'+
+        '<td class="act"><button class="btn" data-act="unban" data-type="group" data-id="'+esc(c.chat_id)+'">Unban</button></td></tr>';
+    }).join(""));
+
+    html += tableSection("Flagging revoked", ["User","False flags","Since","Action"], e.flaggingRevoked.map(function(u){
+      return '<tr><td>'+fpChip(u.user_id)+' <span class="mut">'+esc(u.username||"")+'</span></td>'+
+        '<td class="num" style="color:var(--coral)">'+nf(u.false_flags)+'</td>'+
+        '<td class="num">'+esc((u.flagging_revoked_at||"").slice(0,10))+'</td>'+
+        '<td class="act"><button class="btn" data-act="restore" data-id="'+esc(u.user_id)+'">Restore</button></td></tr>';
+    }).join(""));
+
+    $("content").innerHTML = html;
+  }
+
+  /* ---------- Settings view (admin only) ---------- */
+  function settingVal(list, key){ var o={}; (list||[]).forEach(function(r){o[r.key]=r.value;}); return o[key]; }
+  function renderSettings(){
+    var d = state.viewData || {};
+    var ops = d.operators||[], settings = d.settings||[], lists = d.lists||[], audit = d.audit||[];
+    var openList = state.openList;
+    var s = {}; settings.forEach(function(r){ s[r.key]=r.value; });
+
+    var html = '<div class="stack">';
+
+    /* operators */
+    html += '<section class="panel"><div class="p-head"><h3>Operators</h3><span class="hint">who can moderate · attributed in the audit log</span></div>'+
+      '<div style="overflow-x:auto"><table><thead><tr><th>Username</th><th>Role</th><th>Last login</th><th style="text-align:right">Actions</th></tr></thead><tbody>'+
+      (ops.map(function(o){
+        var roleBtn = o.role==="admin"
+          ? '<button class="btn" data-act="op-role" data-id="'+esc(o.id)+'" data-role="moderator">→ moderator</button>'
+          : '<button class="btn" data-act="op-role" data-id="'+esc(o.id)+'" data-role="admin">→ admin</button>';
+        var disBtn = o.disabled_at
+          ? '<button class="btn" data-act="op-disable" data-id="'+esc(o.id)+'" data-disabled="false">Enable</button>'
+          : '<button class="btn danger" data-act="op-disable" data-id="'+esc(o.id)+'" data-disabled="true">Disable</button>';
+        return '<tr><td><b>'+esc(o.username)+'</b>'+(o.disabled_at?' <span class="tag">disabled</span>':'')+'</td>'+
+          '<td><span class="role-pill '+esc(o.role)+'">'+esc(o.role)+'</span></td>'+
+          '<td class="num diag">'+esc((o.last_login_at||"—").slice(0,16).replace("T"," "))+'</td>'+
+          '<td class="act">'+roleBtn+'<button class="btn" data-act="op-pass" data-id="'+esc(o.id)+'">Password</button>'+disBtn+'</td></tr>';
+      }).join("") || '<tr><td colspan="4"><div class="empty">no operators — you are in bootstrap mode</div></td></tr>')+
+      '</tbody></table></div>'+
+      '<div class="frm"><input class="inp" id="opUser" placeholder="username"><input class="inp" id="opPass" type="password" placeholder="password (min 8)">'+
+      '<select class="inp" id="opRole"><option value="moderator">moderator</option><option value="admin">admin</option></select>'+
+      '<button class="btn primary" data-act="op-add">Add operator</button></div></section>';
+
+    /* thresholds */
+    var cap=s.content_gate_cap, ft=s.false_flag_threshold, decay=s.false_flag_decay_months;
+    html += '<section class="panel"><div class="p-head"><h3>Moderation thresholds</h3><span class="hint">admin_settings · live</span></div>'+
+      '<div class="frm">'+
+        '<label class="mut">Content gate cap <input class="inp" id="setCap" type="number" min="1" style="width:70px" value="'+esc(cap==null?3:cap)+'"></label>'+
+        '<label class="mut">False-flag threshold <input class="inp" id="setFt" type="number" min="1" style="width:70px" value="'+esc(ft==null?3:ft)+'"></label>'+
+        '<label class="mut">Decay (months) <input class="inp" id="setDecay" type="number" min="1" style="width:70px" value="'+esc(decay==null?6:decay)+'"></label>'+
+        '<button class="btn primary" data-act="set-thresholds">Save</button>'+
+      '</div></section>';
+
+    /* watchlists */
+    var listRows = lists.map(function(l){
+      return '<tr><td><b>'+esc(l.name)+'</b> <span class="tag">'+esc(l.source)+'</span>'+(l.description?'<div class="meta subj">'+esc(l.description)+'</div>':'')+'</td>'+
+        '<td class="num">'+nf(l.term_count)+'</td>'+
+        '<td><button class="btn toggle'+(l.enabled?" on":"")+'" data-act="list-toggle" data-id="'+esc(l.id)+'" data-enabled="'+(l.enabled?"true":"false")+'">'+(l.enabled?"enabled":"disabled")+'</button></td>'+
+        '<td class="act"><button class="btn" data-act="list-terms" data-id="'+esc(l.id)+'">'+(openList===l.id?"hide":"terms")+'</button>'+
+        '<button class="btn" data-act="list-export" data-id="'+esc(l.id)+'">export</button>'+
+        '<button class="btn danger" data-act="list-del" data-id="'+esc(l.id)+'">delete</button></td></tr>';
+    }).join("") || '<tr><td colspan="4"><div class="empty">no lists</div></td></tr>';
+
+    var termsBlock = "";
+    if(openList){
+      var terms = d.terms||[];
+      var trows = terms.map(function(t){
+        return '<tr><td class="num">'+esc(t.pattern)+'</td><td><span class="pill watch">'+esc(t.category)+'</span></td>'+
+          '<td class="act"><button class="btn danger" data-act="term-del" data-id="'+esc(t.id)+'">remove</button></td></tr>';
+      }).join("") || '<tr><td colspan="3"><div class="empty">no terms</div></td></tr>';
+      termsBlock = '<div style="border-top:1px solid var(--border)"><div class="p-head" style="border:none"><h3 style="font-size:11px">Terms in selected list</h3></div>'+
+        '<div style="overflow-x:auto"><table><thead><tr><th>Pattern (regex)</th><th>Category</th><th style="text-align:right">·</th></tr></thead><tbody>'+trows+'</tbody></table></div>'+
+        '<div class="frm"><input class="inp grow" id="termPat" placeholder="regex e.g. \\myaddress\\M"><input class="inp" id="termCat" placeholder="category"><button class="btn primary" data-act="term-add">Add term</button></div></div>';
+    }
+
+    html += '<section class="panel"><div class="p-head"><h3>Watchlists</h3><span class="hint">scans plaintext names only — never messages · disabled lists don\'t match</span></div>'+
+      '<div style="overflow-x:auto"><table><thead><tr><th>List</th><th>Terms</th><th>State</th><th style="text-align:right">Actions</th></tr></thead><tbody>'+listRows+'</tbody></table></div>'+
+      termsBlock+
+      '<div class="frm"><input class="inp grow" id="listName" placeholder="new list name"><input class="inp grow" id="listDesc" placeholder="description (optional)">'+
+      '<button class="btn primary" data-act="list-add">Create list</button>'+
+      '<input type="file" id="importFile" accept="application/json,.json" style="display:none">'+
+      '<button class="btn" data-act="import-file">Import JSON…</button>'+
+      '<select class="inp" id="presetSel"><option value="">preset…</option></select>'+
+      '<button class="btn" data-act="preset-import">Import preset</button></div></section>';
+
+    /* audit + transparency */
+    html += '<section class="panel"><div class="p-head"><h3>Audit log</h3><span class="hint">last '+audit.length+' actions</span>'+
+      '<button class="btn" data-act="transparency-export" style="margin-left:8px">Transparency export</button></div>'+
+      '<div style="overflow-x:auto"><table><thead><tr><th>When</th><th>Operator</th><th>Action</th><th>Target</th></tr></thead><tbody>'+
+      (audit.map(function(a){
+        return '<tr><td class="num diag">'+esc((a.created_at||"").slice(0,16).replace("T"," "))+'</td>'+
+          '<td>'+esc(a.operator_label||"—")+'</td><td><span class="pill watch">'+esc(a.action)+'</span></td>'+
+          '<td class="num diag">'+esc((a.target_type?a.target_type+" ":"")+String(a.target_id||"").slice(0,12))+'</td></tr>';
+      }).join("") || '<tr><td colspan="4"><div class="empty">no actions yet</div></td></tr>')+
+      '</tbody></table></div></section>';
+
+    html += '</div>';
+    $("content").innerHTML = html;
+    wireSettings();
+  }
+
+  // Non-click wiring for the settings view (file input + preset list).
+  function wireSettings(){
+    var f = $("importFile");
+    if(f) f.onchange = function(){
+      var file = f.files && f.files[0]; if(!file) return;
+      var rd = new FileReader();
+      rd.onload = function(){ try{ var payload=JSON.parse(rd.result);
+        act("list_import",{payload:payload}); }catch(e){ alert("invalid JSON: "+e.message); } };
+      rd.readAsText(file);
+    };
+    var sel = $("presetSel");
+    if(sel && !sel.dataset.loaded){ sel.dataset.loaded="1";
+      fetch("presets/index.json").then(function(r){ return r.ok?r.json():[]; }).then(function(list){
+        (list||[]).forEach(function(p){ var o=document.createElement("option"); o.value=p.file; o.textContent=p.name||p.file; sel.appendChild(o); });
+      }).catch(function(){});
+    }
+  }
+
+  /* ---------- report / signals views ---------- */
+  function renderReports(){
+    var reps = (state.viewData && state.viewData.reports) || [];
+    var head = '<div style="display:flex;justify-content:flex-end;margin-bottom:-6px"><button class="btn toggle'+(state.showResolved?" on":"")+'" data-act="toggle-resolved">'+(state.showResolved?"showing all":"open only")+'</button></div>';
+    $("content").innerHTML = head + reportQueue(reps);
+  }
+  function renderSignals(){
+    var sig = (state.viewData && state.viewData.signals) || [];
+    $("content").innerHTML = signalsPanel(sig);
+  }
+
+  /* ---------- actions (delegated) ---------- */
+  function act(action, body){
+    api(action,{method:"POST",body:body}).then(function(){ loadView(); refreshBadge(); })
+      .catch(function(e){ if(e.status===401){ showLogin("session expired — sign in again"); } else alert(e.message); });
+  }
+  function onContentClick(ev){
+    var el = ev.target.closest && ev.target.closest("[data-act]"); if(!el) return;
+    var a = el.dataset.act, id = el.dataset.id;
+    switch(a){
+      case "ban": if(confirm("Ban this "+el.dataset.type+"? This suspends the account/chat.")) act("ban",{type:el.dataset.type,id:id}); break;
+      case "unban": act("unban",{type:el.dataset.type,id:id}); break;
+      case "resolve": act("resolve",{report_id:id,resolution:el.dataset.res}); break;
+      case "restore": act("restore_flagging",{user_id:id}); break;
+      case "ent-ban": { var t=$("entType").value, v=$("entId").value.trim(); if(!v)return;
+        if(confirm("Ban this "+t+"?")) act("ban",{type:t,id:v}); break; }
+      case "ent-unban": { var t2=$("entType").value, v2=$("entId").value.trim(); if(!v2)return; act("unban",{type:t2,id:v2}); break; }
+      case "toggle-resolved": state.showResolved=!state.showResolved; loadView(); break;
+      case "op-add": { var u=$("opUser").value.trim(), p=$("opPass").value, r=$("opRole").value;
+        if(!u||!p){alert("username + password required");return;} act("operator_add",{username:u,password:p,role:r}); break; }
+      case "op-disable": act("operator_disable",{id:id,disabled:el.dataset.disabled==="true"}); break;
+      case "op-role": act("operator_set_role",{id:id,role:el.dataset.role}); break;
+      case "op-pass": { var np=prompt("New password (min 8):"); if(np) act("operator_set_password",{id:id,password:np}); break; }
+      case "set-thresholds": saveThresholds(); break;
+      case "list-add": { var n=$("listName").value.trim(); if(!n){alert("name required");return;}
+        act("list_add",{name:n,description:$("listDesc").value.trim()||null}); break; }
+      case "list-toggle": act("list_set_enabled",{id:id,enabled:el.dataset.enabled!=="true"}); break;
+      case "list-del": if(confirm("Delete this list and all its terms?")) act("list_delete",{id:id}); break;
+      case "list-terms": state.openList = (state.openList===id?null:id); loadView(); break;
+      case "list-export": exportList(id); break;
+      case "term-add": { var pat=$("termPat").value.trim(); if(!pat){alert("pattern required");return;}
+        act("term_add",{list_id:state.openList,pattern:pat,category:$("termCat").value.trim()||"other"}); break; }
+      case "term-del": act("term_remove",{id:id}); break;
+      case "import-file": $("importFile").click(); break;
+      case "preset-import": importPreset($("presetSel").value); break;
+      case "transparency-export": exportTransparency(); break;
+    }
+  }
+  function saveThresholds(){
+    var jobs = [
+      ["content_gate_cap", parseInt($("setCap").value,10)],
+      ["false_flag_threshold", parseInt($("setFt").value,10)],
+      ["false_flag_decay_months", parseInt($("setDecay").value,10)]
+    ].filter(function(x){ return !isNaN(x[1]) && x[1]>=1; });
+    Promise.all(jobs.map(function(j){ return api("settings_set",{method:"POST",body:{key:j[0],value:j[1]}}); }))
+      .then(function(){ loadView(); }).catch(function(e){ alert(e.message); });
+  }
+  function exportList(id){
+    api("list_export",{query:"list_id="+encodeURIComponent(id)}).then(function(r){
+      download("watchlist-"+id.slice(0,8)+".json", JSON.stringify(r.list,null,2), "application/json");
+    }).catch(function(e){ alert(e.message); });
+  }
+  function importPreset(file){
+    if(!file){ alert("choose a preset first"); return; }
+    fetch("presets/"+file).then(function(r){ if(!r.ok) throw new Error("preset not found"); return r.json(); })
+      .then(function(payload){ payload.source="preset"; act("list_import",{payload:payload}); })
+      .catch(function(e){ alert(e.message); });
+  }
+  function exportTransparency(){
+    api("transparency").then(function(r){
+      var rows=r.transparency||[];
+      var csv="metric,value\n"+rows.map(function(x){return x.metric+","+x.value;}).join("\n");
+      download("chattr-transparency.csv", csv, "text/csv");
+    }).catch(function(e){ alert(e.message); });
+  }
+  function download(name, text, mime){
+    var b=new Blob([text],{type:mime||"application/json"}), u=URL.createObjectURL(b);
+    var a=document.createElement("a"); a.href=u; a.download=name; document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(u); a.remove(); }, 800);
+  }
+
+  /* ---------- data loading per view ---------- */
+  function refreshBadge(){
+    api("reports").then(function(r){ setBadge((r.reports||[]).length); }).catch(function(){});
+  }
+  function setBadge(n){ var b=$("navReports"); if(n>0){ b.textContent=n; b.style.display=""; } else { b.style.display="none"; } }
+
+  function loadView(){
+    var v = state.view;
+    $("content").innerHTML='<div class="empty">Loading…</div>';
+    var fail = function(e){
+      if(e && e.status===401){ showLogin("session expired — sign in again"); return; }
+      $("content").innerHTML='<div class="empty" style="color:var(--coral)">'+esc(e&&e.message||e)+'</div>';
+    };
+    if(v==="overview"){
+      Promise.all([ api("stats",{query:"bucket="+state.bucket}), api("reports"), api("signals") ])
+        .then(function(res){ state.data=res[0]; state.data.reports=(res[1]&&res[1].reports)||[];
+          state.data.signals=(res[2]&&res[2].signals)||[]; setBadge(state.data.reports.length); renderOverview(); })
+        .catch(fail);
+    } else if(v==="reports"){
+      api("reports",{query:state.showResolved?"resolved=true":""}).then(function(r){
+        state.viewData={reports:r.reports||[]}; setBadge((r.reports||[]).filter(function(x){return x.resolution==="open";}).length); renderReports(); }).catch(fail);
+    } else if(v==="signals"){
+      api("signals").then(function(r){ state.viewData={signals:r.signals||[]}; renderSignals(); }).catch(fail);
+    } else if(v==="users"){
+      api("enforcement").then(function(r){ state.viewData=r; renderUsers(); }).catch(fail);
+    } else if(v==="settings"){
+      var calls=[ api("operators"), api("settings"), api("lists"), api("audit",{query:"limit=200"}) ];
+      if(state.openList) calls.push(api("list_terms",{query:"list_id="+encodeURIComponent(state.openList)}));
+      Promise.all(calls).then(function(res){
+        state.viewData={ operators:res[0].operators||[], settings:res[1].settings||[], lists:res[2].lists||[],
+          audit:res[3].audit||[], terms: res[4]?(res[4].terms||[]):[] };
+        renderSettings(); }).catch(fail);
+    }
+  }
+
+  /* ---------- routing ---------- */
+  function route(view){
+    if(view==="settings" && state.role!=="admin") view="overview";
+    state.view=view;
+    document.querySelectorAll("#nav a").forEach(function(a){ a.classList.toggle("active", a.dataset.view===view); });
+    $("crumb").innerHTML = 'admin / <b>'+esc(view)+'</b>';
+    $("bucketSeg").style.display = view==="overview" ? "" : "none";
+    loadView();
+  }
+
+  /* ---------- screens ---------- */
+  function showGate(err){ $("gate").style.display="grid"; $("login").style.display="none"; $("app").style.display="none"; $("gateErr").textContent=err||""; }
+  function showLogin(err){ $("gate").style.display="none"; $("login").style.display="grid"; $("app").style.display="none"; $("loginErr").textContent=err||""; }
+  function showApp(){ $("gate").style.display="none"; $("login").style.display="none"; $("app").style.display="grid";
+    $("navSettings").style.display = state.role==="admin" ? "" : "none";
+    var host = state.base ? (function(){ try{ return new URL(state.base).host; }catch(_){ return state.base; } })()
+                          : (location.host + " · bound");
+    $("footHost").textContent = host; }
+
+  /* ---------- boot / auth ---------- */
+  function boot(){
+    api("whoami").then(function(w){
+      if(w.requiresLogin){
+        if(state.session && w.role){ state.role=w.role; state.username=w.username; showApp(); route("overview"); }
+        else { state.session=""; SS.removeItem("chattr_admin_session"); showLogin(); }
+      } else {
+        // legacy single-operator (0 operators): the network gate is enough; the
+        // UI acts as admin so you can bootstrap the first operator in Settings.
+        state.role="admin"; showApp(); route("overview");
+      }
+    }).catch(function(e){
+      // whoami failed → not behind the injecting proxy: dev fallback gate.
+      if(!state.secret){ showGate("auto-connect failed — this page isn't behind the admin-proxy. Enter API base + secret manually."); }
+      else if(e.status===401){ SS.removeItem("chattr_admin_secret"); showGate("wrong secret — reconnect"); }
+      else { showGate(e.message||"connection failed"); }
+    });
+  }
+
+  /* ---------- event bindings (once) ---------- */
+  $("content").addEventListener("click", onContentClick);
+  document.querySelectorAll("#nav a").forEach(function(a){ a.onclick=function(){ if(a.dataset.view) route(a.dataset.view); }; });
+
+  $("loginBtn").onclick=function(){
+    var u=$("lgUser").value.trim(), p=$("lgPass").value;
+    if(!u||!p){ $("loginErr").textContent="username + password required"; return; }
+    api("login",{method:"POST",body:{username:u,password:p}}).then(function(r){
+      state.session=r.token; state.role=r.role; state.username=r.username;
+      SS.setItem("chattr_admin_session", r.token);
+      showApp(); route("overview");
+    }).catch(function(e){ $("loginErr").textContent = e.status===401 ? "invalid credentials" : e.message; });
+  };
+  $("lgPass").addEventListener("keydown",function(e){ if(e.key==="Enter") $("loginBtn").click(); });
+
+  $("connectBtn").onclick=function(){
+    state.base=$("apiBase").value.trim(); state.secret=$("secret").value;
+    if(!state.base||!state.secret){ $("gateErr").textContent="both fields required"; return; }
+    SS.setItem("chattr_admin_base",state.base); SS.setItem("chattr_admin_secret",state.secret);
+    boot();
+  };
+  $("secret").addEventListener("keydown",function(e){ if(e.key==="Enter") $("connectBtn").click(); });
+  $("logoutBtn").onclick=function(){ state.session=""; SS.removeItem("chattr_admin_session"); state.role=null;
+    boot(); };
+  $("reloadBtn").onclick=function(){ loadView(); refreshBadge(); };
+  $("themeBtn").onclick=function(){ var r=document.documentElement;
+    var cur=r.getAttribute("data-theme")|| (matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");
+    r.setAttribute("data-theme",cur==="dark"?"light":"dark"); };
+  document.querySelectorAll("#bucketSeg button").forEach(function(b){ b.onclick=function(){
+    document.querySelectorAll("#bucketSeg button").forEach(function(x){x.classList.remove("on");});
+    b.classList.add("on"); state.bucket=b.dataset.b; if(state.view==="overview") loadView(); }; });
+
+  /* ---------- startup ----------
+     Bound mode (default): same-origin, secret injected by the admin-proxy.
+     A saved dev session (base+secret) points at a remote API instead. Either
+     way boot() calls whoami → login screen if operators exist, else straight in. */
+  state.session = SS.getItem("chattr_admin_session") || "";
+  var savedBase=SS.getItem("chattr_admin_base"), savedSecret=SS.getItem("chattr_admin_secret");
+  if(savedBase) $("apiBase").value=savedBase;
+  if(savedBase && savedSecret){ state.base=savedBase; state.secret=savedSecret; }
+  boot();
+})();
+</script>
+</body>
+</html>

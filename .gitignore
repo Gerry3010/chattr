@@ -1,0 +1,72 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# Environment variables
+.env
+.env.backup
+/supabase/.env.supabase
+
+# Supabase migration tracking
+/supabase/migrations/.migration_history
+
+# Firebase credentials
+fcm-private-key.json
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+#.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+chat.json
+
+# Generated native hybrid-KEM libraries (build via native/build.sh)
+android/app/src/main/jniLibs/*/libchattr_crypto.*
+
+# Supabase CLI temp state (machine-local, changes on every CLI run)
+supabase/.temp/
+
+# MCP agent server (Node) — build output + local env; per-machine agent state
+# lives outside the repo entirely (~/.config/chattr-agent/, see mcp_server/README.md)
+/mcp_server/node_modules/
+/mcp_server/build/
+/mcp_server/.env
+
+# Real deploy hosts (kept out of the public repo)
+scripts/.deploy-hosts.env
