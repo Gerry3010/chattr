@@ -17,8 +17,8 @@
     "test:revoke": "npm run build && node --test build/mcp_server/test/revoke_kicks_agents.test.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "@supabase/supabase-js": "^2.49.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@supabase/supabase-js": "^2.111.0",
     "zod": "^3.24.0",
     "@noble/curves": "^1.8.1",
     "mlkem": "^2.7.0",
