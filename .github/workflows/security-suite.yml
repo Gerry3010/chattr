@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Deeper supply-chain layer — mirrors the Bitbucket `trivy-scan` and
+# `govulncheck-scan` steps onto the public mirror:
+#   • Trivy fs — dependency & config CVEs (pubspec.lock, go.sum, npm, Dockerfiles)
+#   • govulncheck — Go vulnerability DB for the native ML-KEM crypto core
+# Both are non-blocking (report-only). ZAP/DAST stays on Bitbucket (needs the
+# staging URL) and is intentionally NOT mirrored here.
+name: Security suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "47 3 * * 1" # Monday 03:47 UTC
+  workflow_dispatch:
+
+jobs:
+  trivy:
+    name: Trivy fs (deps & config CVEs)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan (SARIF)
+        # Pinned to a COMMIT SHA, not a tag: in March 2026 an attacker
+        # force-pushed 76 of 77 version tags in this action to credential-
+        # stealing malware (GHSA-69fq-xp46-6x23). A tag is a movable pointer,
+        # a SHA is not — so a mutable reference is exactly the wrong thing to
+        # trust in a step that sees the runner's token. The old `@0.28.0` pin
+        # was cleaned up during that incident and no longer resolves at all,
+        # which is why every run of this workflow failed silently since the
+        # mirror was created.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0" # report, never gate
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+  govulncheck:
+    name: govulncheck (Go crypto core)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/chattr_crypto/go.mod
+
+      - name: Run govulncheck
+        working-directory: native/chattr_crypto
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./... | tee govulncheck-results.txt || true
+
+      - name: Upload govulncheck report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: govulncheck-results
+          path: native/chattr_crypto/govulncheck-results.txt

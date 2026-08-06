@@ -1,0 +1,796 @@
+image: ghcr.io/cirruslabs/flutter:3.44.0
+
+definitions:
+  caches:
+    flutter-pub: ~/.pub-cache
+    flutter-build: .dart_tool
+    # APK build toolchains (self-hosted runner keeps these on the host across
+    # runs → only the first APK build pays the install cost).
+    cargo: ~/.cargo
+    rustup: ~/.rustup
+    gomod: ~/go/pkg/mod
+    android-sdk: ~/.android-sdk-extra
+  steps:
+    # Static analysis + unit tests. Integration tests (live Supabase / native
+    # crypto) self-skip when those aren't present, so this runs anywhere.
+    - step: &analyze-and-test
+        name: Analyze & Test
+        # Läuft auf den self-hosted Netcup-Runnern (workspace-weit) statt BB-Cloud.
+        runs-on:
+          - self.hosted
+          - linux
+        caches:
+          - flutter-pub
+          - flutter-build
+        script:
+          # Ein gebündelter Block, dessen Output nach pipe.log gespiegelt wird,
+          # damit das after-script bei Fehler die letzten Zeilen an die pipepush-
+          # Notification hängen kann. set -eo pipefail erhält die Fail-Fast- und
+          # Exit-Code-Semantik der früheren item-Liste (tee würde den Code sonst
+          # schlucken).
+          - |
+            set -eo pipefail
+            {
+              flutter --version
+              # webcrypto 0.6.1 builds its native assets via a build hook that
+              # needs cmake (+ ninja) on the host — not in the flutter image.
+              apt-get update && apt-get install -y cmake ninja-build
+              # pubspec declares .env as an asset; create a placeholder so
+              # `flutter analyze` doesn't fail with asset_does_not_exist (the real
+              # .env is written from secrets in the Build step). Unit tests don't
+              # read it.
+              printf 'SUPABASE_URL=placeholder\nSUPABASE_ANON_KEY=placeholder\n' > .env
+              # The `flutter-pub: ~/.pub-cache` cache retains git dependencies
+              # (chatview / chatview_utils forks) keyed by URL. When a fork TAG moves
+              # (e.g. chattr-3.1.0-p10 → p11), pub reuses the stale cached checkout and
+              # resolves the fork's OWN pubspec from the old commit — silently dropping
+              # chatview's transitive deps (emoji_picker_flutter, any_link_preview, …)
+              # and leaving package_graph.json inconsistent ("dependencies for X
+              # missing"). Removing the git cache forces a fresh clone of the pinned
+              # ref, so resolution is correct; hosted packages stay cached. Also drop
+              # the regenerable .dart_tool manifests so the graph is rebuilt clean.
+              rm -rf ~/.pub-cache/git .dart_tool/package_graph.json .dart_tool/package_config.json
+              flutter pub get
+              flutter analyze
+              flutter test --exclude-tags integration
+            } 2>&1 | tee "${BITBUCKET_CLONE_DIR:-.}/pipe.log"
+
+        after-script:
+          # pipepush: nur bei Fehler melden (Erfolg meldet der Deploy-Step).
+          # Der Helper hängt Build-Log-Link + (bei Fehler) den Step-Log-Tail an.
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" failure-only
+
+    # ── Security scans ──────────────────────────────────────────────────────
+    # SAST on every push (fast, non-blocking, runs parallel to analyze-and-test
+    # so it never gates the deploy). --config=auto pulls community rulesets
+    # (Dart + Go) from the registry anonymously; no SEMGREP_APP_TOKEN needed.
+    - step: &security-fast
+        name: "Security – SAST (Semgrep)"
+        # Läuft auf den self-hosted Netcup-Runnern statt BB-Cloud.
+        runs-on:
+          - self.hosted
+          - linux
+        # pip-installed semgrep in a plain python image, NOT the official
+        # returntocorp/semgrep image — the latter's docker-entrypoint expects the
+        # code mounted at /src and aborts in Bitbucket (code lives in the clone
+        # dir). pip install avoids that detection entirely. One scan, both
+        # machine-readable artifacts (--*-output combine), text summary to log.
+        image: python:3.12-slim
+        script:
+          - pip install --quiet semgrep
+          - semgrep scan --config=auto --json-output=semgrep-results.json --sarif-output=semgrep-results.sarif || true
+        artifacts:
+          - semgrep-results.json
+          - semgrep-results.sarif
+
+    # Dependency & container CVE scan — Trivy fs scans pubspec.lock AND
+    # native/chattr_crypto/go.sum in one pass. Never fails the pipeline.
+    - step: &trivy-scan
+        name: "Security – Deps & Container (Trivy)"
+        image: aquasec/trivy:latest
+        script:
+          - trivy fs --severity HIGH,CRITICAL --format json --output trivy-fs-results.json --exit-code 0 .
+          - trivy fs --severity HIGH,CRITICAL --exit-code 0 .
+        artifacts:
+          - trivy-fs-results.json
+
+    # Go CVEs for the native crypto core (ML-KEM-768 via cloudflare/circl).
+    # Image matches go.mod's `go 1.26`.
+    - step: &govulncheck-scan
+        name: "Security – Go CVEs (govulncheck)"
+        image: golang:1.26
+        script:
+          - go install golang.org/x/vuln/cmd/govulncheck@latest
+          - export PATH="$PATH:$(go env GOPATH)/bin"
+          - (cd native/chattr_crypto && govulncheck ./...) | tee govulncheck-results.txt || true
+        artifacts:
+          - govulncheck-results.txt
+
+    # DAST — OWASP ZAP baseline (passive). Runs ONLY against $STAGING_URL and
+    # self-skips if that repo var is unset, so it can NEVER hit prod. Wired up
+    # in Phase B once the persistent staging stack exists.
+    - step: &zap-baseline
+        name: "Security – DAST (OWASP ZAP Baseline)"
+        image: ghcr.io/zaproxy/zaproxy:stable
+        script:
+          - |
+            if [ -z "${STAGING_URL:-}" ]; then
+              echo "STAGING_URL nicht gesetzt — ZAP übersprungen (nie gegen Prod)."
+              exit 0
+            fi
+          # ZAP writes file reports to /zap/wrk; it aborts with "not mounted" if
+          # that dir doesn't exist (Bitbucket can't mount volumes), so create it.
+          - mkdir -p /zap/wrk
+          - zap-baseline.py -t "$STAGING_URL" -r zap-report.html -J zap-report.json -I || true
+          - for f in zap-report.html zap-report.json; do [ -f "/zap/wrk/$f" ] && cp "/zap/wrk/$f" . || true; done
+        artifacts:
+          - zap-report.html
+          - zap-report.json
+
+    # One pipepush notification summarizing all findings (weekly only).
+    # Reuses the existing PIPEPUSH_TOKEN but posts under pipeline "security-scan"
+    # → its own clearly-named notification stream in the chattr project.
+    - step: &pipepush-notify
+        name: "Security – Pipepush-Benachrichtigung"
+        image: python:3.12-slim
+        script:
+          - pip install --quiet requests
+          - python scripts/notify_via_pipepush.py
+
+    # ── Staging deploy (custom pipeline, manual/scheduled) ──────────────────
+    # Builds the web app against the STAGING Supabase and ships it to the
+    # persistent staging stack on the VPS (own isolated Supabase, see
+    # docs/STAGING_SETUP.md). Replaces the one-off manual seed. The staging
+    # ZAP/DAST target (STAGING_URL) is kept current by this.
+    - step: &build-staging
+        name: "Build Web (Staging)"
+        image: ghcr.io/cirruslabs/flutter:3.44.0
+        caches:
+          - flutter-pub
+          - flutter-build
+        script:
+          - apt-get update && apt-get install -y cmake ninja-build
+          # Force a fresh clone of pinned git deps + rebuild the graph (see Analyze step).
+          - rm -rf ~/.pub-cache/git .dart_tool/package_graph.json .dart_tool/package_config.json
+          - flutter pub get
+          - echo "SUPABASE_URL=${{STAGING_SUPABASE_URL}}" > .env
+          - echo "SUPABASE_ANDROID_URL=${{STAGING_SUPABASE_URL}}" >> .env
+          - echo "SUPABASE_ANON_KEY=${{STAGING_SUPABASE_ANON_KEY}}" >> .env
+          - flutter build web --release
+        artifacts:
+          - build/web/**
+
+    - step: &deploy-staging
+        name: "Deploy to Staging"
+        deployment: staging
+        image: atlassian/default-image:3
+        # Staging lives on the IONOS box (its own STAGING_SERVER_ADDR var), NOT the
+        # repo-wide SERVER_ADDR which now points at the netcup prod box after the
+        # Wien migration. Prod deploy below keeps using SERVER_ADDR (netcup).
+        script:
+          - apt-get update && apt-get install -y rsync openssh-client
+          # Web app → staging web root.
+          - rsync -az --delete build/web/ chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/web/
+          # Admin console (static) → staging admin root (served by the IONOS nginx
+          # vhost staging-admin.chattr.geraldhofbauer.net behind basic_auth).
+          - rsync -az --delete landing/admin/ chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/admin/
+          # Supabase stack → staging, PRESERVING the staging-only files: the
+          # generated .env (own keys), the isolated compose, the migration
+          # history (tracks what's applied to staging), and the data volumes.
+          - rsync -az --exclude='.env' --exclude='docker-compose.staging.yml' --exclude='docker-compose.override.yml' --exclude='.migration_history' --exclude='volumes/db/data' --exclude='volumes/storage' supabase/ chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/supabase/
+          # admin-stats gate secret → staging (file passthrough; heredoc below is
+          # single-quoted). No-op if unset.
+          - |
+            if [ -n "${ADMIN_STATS_SECRET:-}" ]; then
+              printf '%s' "$ADMIN_STATS_SECRET" > admin_stats_secret
+              rsync -az admin_stats_secret chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/supabase/.admin_stats_secret
+              rm -f admin_stats_secret
+            fi
+          - |
+            ssh chattr@${{STAGING_SERVER_ADDR}} << 'EOF'
+              set -e
+              cd ~/staging/supabase
+              # Inject the admin-stats gate secret into the staging .env (idempotent).
+              if [ -s .admin_stats_secret ] && [ -f .env ]; then
+                { grep -v '^ADMIN_STATS_SECRET=' .env 2>/dev/null || true; printf "ADMIN_STATS_SECRET='%s'\n" "$(cat .admin_stats_secret)"; } > .env.new && mv .env.new .env
+              fi
+              rm -f .admin_stats_secret
+              export COMPOSE_PROJECT_NAME=chattr_staging
+              # Rebuild the isolated compose from the (possibly updated) prod one:
+              # prefix container names + rebind published ports to a 127.0.0.1
+              # staging range so it never collides with prod on the same engine.
+              sed -E \
+                -e 's|^(    container_name: )([^[:space:]]+)|\1staging-\2|' \
+                -e 's|^(      - )"127\.0\.0\.1:\$\{KONG_HTTP_PORT\}:8000/tcp"|\1"127.0.0.1:8110:8000/tcp"|' \
+                -e 's|^(      - )"127\.0\.0\.1:\$\{KONG_HTTPS_PORT\}:8443/tcp"|\1"127.0.0.1:8153:8443/tcp"|' \
+                -e 's|^(      - )"127\.0\.0\.1:\$\{POSTGRES_PORT\}:5432"|\1"127.0.0.1:5532:5432"|' \
+                -e 's|^(      - )"127\.0\.0\.1:\$\{POOLER_PROXY_PORT_TRANSACTION\}:6543"|\1"127.0.0.1:6643:6543"|' \
+                -e 's|^(      - )"127\.0\.0\.1:4000:4000"|\1"127.0.0.1:4110:4000"|' \
+                -e 's|^(      - )"127.0.0.1:\$\{ADMIN_PANEL_PORT:-8899\}:80"|\1"127.0.0.1:8199:80"|' \
+                -e 's|\$\{ADMIN_PANEL_ROOT:-\.\./landing/admin\}|../admin|' \
+                docker-compose.yml > docker-compose.staging.yml
+              # Kong adressiert Realtime über den ORIGINAL-Containernamen —
+              # Realtime parst den Tenant aus der Subdomain des Hosts (siehe
+              # Kommentar am realtime-Service im Compose). Der staging-Prefix
+              # oben bricht damit die DNS-Auflösung: Kong antwortet 503 (Name
+              # unauflösbar); kong.yml auf den Prefix-Namen umzubiegen gäbe
+              # stattdessen 403 (Tenant "staging-realtime-dev" existiert
+              # nicht). Ein Netzwerk-Alias mit dem Originalnamen löst beides —
+              # gefunden 2026-08-05, davor war Staging-Realtime schlicht tot
+              # (das erklärte auch den hängenden Staging-Web-Splash).
+              sed -i '/container_name: staging-realtime-dev.supabase-realtime/a\    networks:\n      default:\n        aliases:\n          - realtime-dev.supabase-realtime' docker-compose.staging.yml
+              # Edge functions into the runtime dir (non-destructive; skip tests).
+              if [ -d functions ]; then mkdir -p volumes/functions && rsync -a --exclude='tests' functions/ volumes/functions/; fi
+              docker compose -f docker-compose.staging.yml pull
+              docker compose -f docker-compose.staging.yml up -d
+              # `< /dev/null` ist PFLICHT: `docker compose run` hängt sich per
+              # Default an stdin — und stdin ist hier das SSH-Heredoc. Ohne die
+              # Umleitung frisst der Migrate-Container den Rest des Skripts, und
+              # alles danach verschwindet lautlos (siehe Deploy-to-VPS-Step).
+              docker compose -f docker-compose.staging.yml run --rm -T migrate < /dev/null
+              # Restart functions + admin-proxy so a rotated ADMIN_STATS_SECRET is re-read.
+              docker compose -f docker-compose.staging.yml restart functions admin-proxy 2>/dev/null || true
+            EOF
+        after-script:
+          # pipepush: Erfolg ODER Fehler melden, mit Build-Log-Link + Fehler-Tail.
+          - bash scripts/pipepush_notify.sh deploy-staging always
+
+    - step: &build-web
+        name: Build Flutter Web
+        # Self-hosted seit 2026-08-04: auf BB Cloud stand dieser Schritt eine
+        # Stunde ohne eine einzige neue Logzeile (normal sind ~10 Minuten),
+        # während der eigene Runner mit Last 0.00 danebenlag — Lauf #583 musste
+        # von Hand gestoppt werden. Erlaubt ist der Umzug, weil der Web-Build an
+        # KEINEM BB-verwalteten SSH-Key hängt (das ist die einzige Ausnahme, die
+        # auf Cloud bleiben muss) und auch keine Rust-Toolchain braucht — der
+        # cargokit-Pfad von super_clipboard wird nur nativ gebaut, nicht für Web.
+        runs-on:
+          - self.hosted
+          - linux
+        # 8 GB. Ohne `size` bekommt ein Step 4 GB, und damit hat der OOM-Killer
+        # `dart compile js` in Lauf #586 abgeschossen (exit -9). Auf BB Cloud
+        # ging es mit denselben 4 GB meist noch knapp durch; hier teilt sich der
+        # Schritt die Maschine mit dem parallel laufenden APK-Build, und knapp
+        # reicht dann nicht mehr.
+        #
+        # ACHTUNG Überbuchung: zusammen mit den 2x des APK-Builds sind das 16 GB
+        # Reservierung auf einer 15-GB-Box. Das geht auf, weil beide real
+        # deutlich darunter bleiben (der APK-Build ist seit den Kappungen vom
+        # 2026-08-04 gezügelt: Kotlin-Daemon -Xmx1g, ActiveProcessorCount=4,
+        # CARGO_BUILD_JOBS=2). Stirbt hier doch wieder etwas an OOM, ist der
+        # nächste Schritt NICHT mehr Speicher, sondern die beiden Builds wieder
+        # zu serialisieren.
+        size: 2x
+        caches:
+          - flutter-pub
+          - flutter-build
+        script:
+          # Gebündelt + nach pipe.log gespiegelt (siehe analyze-and-test), damit
+          # das after-script bei Build-Fehler den Log-Tail mitschicken kann.
+          - |
+            set -eo pipefail
+            {
+              # Version aus version.json lesen
+              apt-get update && apt-get install -y jq
+              export APP_VERSION=$(jq -r '.app_version' version.json)
+              export BUILD_NUMBER=$(jq -r '.build_number' version.json)
+              echo "Building version $APP_VERSION+$BUILD_NUMBER"
+              # Frischer Klon der gepinnten git-Deps + Graph-Rebuild (s. Analyze-Step).
+              rm -rf ~/.pub-cache/git .dart_tool/package_graph.json .dart_tool/package_config.json
+              flutter pub get
+              echo "SUPABASE_URL=${{SUPABASE_URL}}" > .env
+              echo "SUPABASE_ANON_KEY=${{SUPABASE_ANON_KEY}}" >> .env
+              flutter build web --release --build-name=$APP_VERSION --build-number=$BUILD_NUMBER
+            } 2>&1 | tee "${BITBUCKET_CLONE_DIR:-.}/pipe.log"
+        artifacts:
+          - build/web/**
+          - landing/**
+          - version.json
+
+        after-script:
+          # pipepush: nur bei Fehler melden (Erfolg meldet der Deploy-Step).
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" failure-only
+
+
+    - step: &deploy-vps
+        name: Deploy to VPS
+        deployment: production
+        runs-on:
+          - self.hosted
+          - linux
+        image: atlassian/default-image:3
+        script:
+          # Read versions from version.json
+          # Nur rsync fehlt im Image — ssh, jq und curl sind drin (geprüft
+          # 2026-08-05). Und der Schritt hängt damit an einem fremden
+          # Paketserver: in Lauf #582 war archive.ubuntu.com nicht erreichbar
+          # und der ganze Deploy brach ab, weil zwei Dateien kopiert werden
+          # sollten. Deshalb: nur das fehlende Paket, drei Versuche mit
+          # wachsender Pause, und am Ende eine klare Aussage statt eines
+          # kryptischen apt-Fehlers mitten im Deploy.
+          - |
+            if ! command -v rsync >/dev/null; then
+              for i in 1 2 3; do
+                apt-get update -qq && apt-get install -y --no-install-recommends rsync && break
+                echo "apt-Versuch $i fehlgeschlagen, neuer Versuch in $((i*10))s"
+                sleep $((i * 10))
+              done
+            fi
+            command -v rsync >/dev/null || {
+              echo "rsync ist nicht verfügbar — Paketquellen nicht erreichbar. Deploy abgebrochen, es wurde NICHTS verändert." >&2
+              exit 1
+            }
+          - export APP_VERSION=$(jq -r '.app_version' version.json)
+          - export BACKEND_VERSION=$(jq -r '.backend_version' version.json)
+          - export LANDING_VERSION=$(jq -r '.landing_version' version.json)
+          - echo "Deploying - App v$APP_VERSION | Backend v$BACKEND_VERSION | Landing v$LANDING_VERSION"
+          # Self-managed deploy key: the BB-managed SSH key isn't injected on
+          # self-hosted runners, so decode DEPLOY_SSH_KEY (secured repo var,
+          # base64) into a key file and use it explicitly for every ssh/rsync.
+          - |
+            install -m 700 -d "$HOME/.ssh"
+            printf '%s' "$DEPLOY_SSH_KEY" | base64 -d > "$HOME/.ssh/chattr_deploy"
+            chmod 600 "$HOME/.ssh/chattr_deploy"
+          - export SSHOPTS="-i $HOME/.ssh/chattr_deploy -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          # Deploy Flutter Web app
+          - rsync -az --delete -e "ssh $SSHOPTS" build/web/ chattr@$SERVER_ADDR:/home/chattr/app/web/
+          # Deploy Landing Page
+          - rsync -az --delete -e "ssh $SSHOPTS" landing/ chattr@$SERVER_ADDR:/home/chattr/app/landing/
+          # Deploy Supabase and version.json
+          - rsync -az -e "ssh $SSHOPTS" supabase/ chattr@$SERVER_ADDR:/home/chattr/app/supabase/
+          - rsync -az -e "ssh $SSHOPTS" version.json chattr@$SERVER_ADDR:/home/chattr/app/
+          # Push the FCM service-account secret (BB secured repo var) to the VPS
+          # as a file — never echoed to logs. Skipped cleanly if the var is unset.
+          - |
+            if [ -n "${FCM_SERVICE_ACCOUNT:-}" ]; then
+              printf '%s' "$FCM_SERVICE_ACCOUNT" > fcm_sa.json
+              rsync -az -e "ssh $SSHOPTS" fcm_sa.json chattr@$SERVER_ADDR:/home/chattr/app/supabase/.fcm_sa.json
+              rm -f fcm_sa.json
+            fi
+          # admin-stats gate secret (plain string) — same file-based passthrough
+          # as FCM because the heredoc below is single-quoted. No-op if unset.
+          - |
+            if [ -n "${ADMIN_STATS_SECRET:-}" ]; then
+              printf '%s' "$ADMIN_STATS_SECRET" > admin_stats_secret
+              rsync -az -e "ssh $SSHOPTS" admin_stats_secret chattr@$SERVER_ADDR:/home/chattr/app/supabase/.admin_stats_secret
+              rm -f admin_stats_secret
+            fi
+          # Restart Supabase and run migrations
+          - |
+            ssh $SSHOPTS chattr@$SERVER_ADDR << 'EOF'
+              cd ~/app/supabase
+              # Inject the FCM service account into .env (idempotent, single-quoted
+              # so compose's dotenv keeps the JSON's double-quotes). Only if .env
+              # already exists, so we never replace it with just this one line.
+              if [ -s .fcm_sa.json ] && [ -f .env ]; then
+                umask 077
+                { grep -v '^FCM_SERVICE_ACCOUNT=' .env 2>/dev/null || true; printf "FCM_SERVICE_ACCOUNT='%s'\n" "$(cat .fcm_sa.json)"; } > .env.new
+                mv .env.new .env
+              fi
+              rm -f .fcm_sa.json
+              # admin-stats gate secret → .env (idempotent; plain string, single
+              # quoted so any special chars survive compose's dotenv parsing).
+              if [ -s .admin_stats_secret ] && [ -f .env ]; then
+                umask 077
+                { grep -v '^ADMIN_STATS_SECRET=' .env 2>/dev/null || true; printf "ADMIN_STATS_SECRET='%s'\n" "$(cat .admin_stats_secret)"; } > .env.new
+                mv .env.new .env
+              fi
+              rm -f .admin_stats_secret
+              # ADMIN_STATS_SECRET reaches the functions container via docker-compose.yml's
+              # own functions.environment (committed) + the .env line above — no override
+              # needed. FCM still uses the override below (it isn't in compose.yml).
+              # Pass the var into the functions container via a compose override —
+              # created only if a 'functions' service exists and nothing is clobbered.
+              if docker compose config --services 2>/dev/null | grep -qx functions && [ ! -e docker-compose.override.yml ]; then
+                printf 'services:\n  functions:\n    environment:\n      FCM_SERVICE_ACCOUNT: ${FCM_SERVICE_ACCOUNT}\n' > docker-compose.override.yml
+                echo "wrote docker-compose.override.yml (FCM passthrough)"
+              fi
+              # Edge functions: the runtime serves ./volumes/functions but the
+              # repo ships them in ./functions — sync so function updates deploy.
+              # Non-destructive (no --delete): never remove the runtime's own
+              # 'main' router or other server-managed files; skip the tests dir.
+              if [ -d functions ]; then
+                mkdir -p volumes/functions
+                rsync -a --exclude='tests' functions/ volumes/functions/ 2>/dev/null || cp -a functions/. volumes/functions/
+              fi
+              docker compose pull
+              docker compose up -d
+              # --rm: ohne das bleibt pro Deploy ein `supabase-migrate-run-*`
+              # Container liegen (40 Stück angesammelt, Stand 2026-08-03) —
+              # Docker meldet sie danach bei jedem `up` als Orphans.
+              # Der Staging-Deploy macht es seit jeher richtig.
+              # `< /dev/null` ist PFLICHT und war der Grund, warum hier seit
+              # jeher NICHTS mehr lief: `docker compose run` hängt sich per
+              # Default an stdin, und stdin ist bei `ssh host << 'EOF'` das
+              # Heredoc selbst. Der Migrate-Container hat also den gesamten Rest
+              # des Deploy-Skripts als Eingabe verschluckt — der Functions-
+              # Restart, das Vault-Seeding und der app_versions-Sync sind nie
+              # ausgeführt worden, ohne eine einzige Fehlermeldung. Nachgestellt
+              # mit `cat > /dev/null` in einem Test-Heredoc.
+              docker compose run --rm -T migrate < /dev/null
+              # app_versions is what clients read via get_backend_version(),
+              # and it had drifted to 1.3.0 / migration 00038 while the server
+              # was long past 00064 — because scripts/sync-backend-version.sh
+              # is manual and nobody remembered it. Today that is harmless
+              # (min_backend_version is 1.0.0), but the day a client ships a
+              # higher minimum it would declare a perfectly current server too
+              # old. Doing it HERE ties it to the one event that makes it true:
+              # the migrations having just been applied.
+              #
+              # The version is read from the version.json rsynced next to this
+              # directory, NOT from a CI variable — the surrounding heredoc is
+              # <<'EOF' (quoted), so nothing from the pipeline shell expands in
+              # here. Single psql -c rather than a heredoc for the same reason:
+              # a nested heredoc inside this one would need its terminator at
+              # column 0 and would break the indentation of the whole block.
+              BACKEND_VERSION=$(sed -n 's/.*"backend_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' ../version.json)
+              LATEST_MIGRATION=$(ls migrations | grep -E '^[0-9]{5}_' | sort | tail -1)
+              if [ -n "$BACKEND_VERSION" ]; then
+                docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=0 -q -c "INSERT INTO app_versions (component, version, description, deployed_by) SELECT c, '$BACKEND_VERSION', 'Synced by CI (migrations up to $LATEST_MIGRATION)', 'pipeline' FROM unnest(ARRAY['backend','database','migrations']) AS c ON CONFLICT (component, version) DO UPDATE SET deployed_at = NOW(), description = EXCLUDED.description;" \
+                  && echo "app_versions → backend v$BACKEND_VERSION ($LATEST_MIGRATION)" \
+                  || echo "app_versions sync failed (non-fatal)"
+              else
+                echo "app_versions sync skipped — no backend_version in ../version.json"
+              fi
+              # Reload the edge runtime so it serves the freshly synced code;
+              # admin-proxy too so a rotated ADMIN_STATS_SECRET is re-read.
+              docker compose restart functions admin-proxy 2>/dev/null || true
+              # Vault: notify triggers authenticate to the edge function via
+              # private.get_secret('service_role_key'); media-retention uses
+              # 'project_url'. Seed both from .env IF MISSING (idempotent no-op
+              # once set) so a fresh DB is reproducible without committing secrets.
+              SRK=$(grep -E '^SERVICE_ROLE_KEY=' .env 2>/dev/null | head -1 | cut -d= -f2-)
+              AEU=$(grep -E '^API_EXTERNAL_URL=' .env 2>/dev/null | head -1 | cut -d= -f2-)
+              if [ -n "$SRK" ]; then
+                docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=0 -v srk="$SRK" -c "SELECT vault.create_secret(:'srk','service_role_key') WHERE NOT EXISTS (SELECT 1 FROM vault.secrets WHERE name='service_role_key');" || true
+              fi
+              if [ -n "$AEU" ]; then
+                docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=0 -v aeu="$AEU" -c "SELECT vault.create_secret(:'aeu','project_url') WHERE NOT EXISTS (SELECT 1 FROM vault.secrets WHERE name='project_url');" || true
+              fi
+            EOF
+          # Log deployment success
+          - |
+            echo << 'EOF'
+            ✓ Deployment completed successfully
+              App: v$APP_VERSION
+              Backend: v$BACKEND_VERSION
+              Landing: v$LANDING_VERSION
+            EOF
+
+        after-script:
+          # pipepush: Erfolg ODER Fehler des Deploys melden, mit Log-Link + Tail.
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" always
+
+    # Baut die Android-APK (der einzige Android-Kanal — kein Play Store,
+    # Codemagic stillgelegt): installiert Go + Rust (cargokit /
+    # super_native_extensions), nutzt das NDK des Images, baut die arm64-Split-
+    # APK (versionCode = build_number + 2000) und **verifiziert** versionCode +
+    # Upload-Key-Zertifikat. Ein Downgrade-Guard überspringt den Step, wenn
+    # version.json nicht gebumpt wurde (Backend-/Landing-only-Deploys), damit
+    # nie ein niedrigerer versionCode gebaut wird.
+    #
+    # VERÖFFENTLICHT NICHT — das macht *publish-apk nach dem Deploy.
+    #
+    # Required secured repo vars: ANDROID_KEYSTORE_BASE64 (base64 of
+    # android/upload-keystore.jks), ANDROID_KEYSTORE_PASSWORD,
+    # ANDROID_KEY_PASSWORD, ANDROID_KEY_ALIAS(=upload). Reuses DEPLOY_SSH_KEY
+    # + SERVER_ADDR (same as the VPS deploy) and SUPABASE_URL/ANON_KEY.
+    - step: &build-apk
+        name: Build Android APK
+        # Self-hosted since 2026-08-04. This step used to be pinned to BB Cloud
+        # because the host had 7.8 GB across three runners and OOM-killed the
+        # Gradle build; it now has 15 GB and 8 cores, so the reservation fits.
+        # Allowed off BB Cloud in the first place because it decodes its OWN
+        # deploy key rather than relying on the BB-managed SSH key (which BB
+        # does not inject on self-hosted runners) — see the CI convention.
+        # Two runners pulling a heavy job at once still fits; three would not.
+        runs-on:
+          - self.hosted
+          - linux
+        size: 2x   # 8 GB reserved
+        image: ghcr.io/cirruslabs/flutter:3.44.0
+        caches:
+          - flutter-pub
+          - flutter-build
+          - gradle
+          - cargo
+          - rustup
+          - gomod
+        script:
+          - |
+            set -eo pipefail
+            {
+              apt-get update && apt-get install -y jq cmake ninja-build rsync openssh-client curl
+              APP_VERSION=$(jq -r '.app_version' version.json)
+              BUILD_NUMBER=$(jq -r '.build_number' version.json)
+              # Shipped alongside the release so the CMS can keep the landing
+              # footer's "Client vX • Backend vY" line in step with CI instead
+              # of it being typed by hand (it had drifted 3 releases behind).
+              BACKEND_VERSION=$(jq -r '.backend_version' version.json)
+              EXPECTED_VC=$((BUILD_NUMBER + 2000))   # --split-per-abi arm64 offset
+              echo "APK target: $APP_VERSION+$BUILD_NUMBER  versionCode=$EXPECTED_VC"
+
+              # ── Downgrade guard: skip if the CMS already serves this build ──
+              SERVED_VC=$(curl -fsSL "https://chattr.at/api/updates/android/manifest.json?u=$(date +%s)" 2>/dev/null | jq -r '.version_code // 0' 2>/dev/null || echo 0)
+              echo "currently served versionCode=$SERVED_VC"
+              if [ "$EXPECTED_VC" -le "$SERVED_VC" ] && [ "${APK_FORCE_BUILD:-0}" != "1" ]; then
+                echo "No version bump (served $SERVED_VC ≥ $EXPECTED_VC) — skipping APK build/publish."
+                exit 0
+              fi
+              # APK_FORCE_BUILD=1 baut trotz Guard — nur über die Custom-Pipeline
+              # `build-apk-dryrun`, die KEINEN Publish-Step hat. Damit lässt sich
+              # der Build auf jedem Branch durchspielen, ohne version.json
+              # anzufassen. (Vorher ging genau das nicht: ohne Bump lief der
+              # Build nicht, mit Bump hätte `build-apk` eine Version
+              # veröffentlicht, die es gar nicht gibt.)
+              [ "${APK_FORCE_BUILD:-0}" = "1" ] && echo "APK_FORCE_BUILD=1 — Guard übergangen (Dry-Run, kein Publish-Step)"
+
+              # ── Toolchains — TRACED (set -x) for diagnosis. xtrace is turned
+              #    OFF again (set +x) before any secret handling below. ──
+              set -x
+              # Go
+              if ! command -v go >/dev/null 2>&1; then
+                curl -sSL https://go.dev/dl/go1.23.4.linux-amd64.tar.gz | tar -C "$HOME" -xz
+              fi
+              export PATH="$HOME/go/bin:$PATH"; go version
+              # Rust (cargokit / super_native_extensions). Source the env after
+              # install and pin a default toolchain — the runner image ships a
+              # stale ~/.rustup/settings.toml that broke `rustup target add`.
+              export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+              export PATH="$CARGO_HOME/bin:$PATH"
+              if ! command -v rustup >/dev/null 2>&1; then
+                curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+              fi
+              [ -f "$CARGO_HOME/env" ] && . "$CARGO_HOME/env"
+              rustup default stable
+              rustup target add aarch64-linux-android
+              rustc --version && cargo --version
+              # Android SDK — fail loudly if the image doesn't ship one.
+              : "${ANDROID_SDK_ROOT:=${ANDROID_HOME:-}}"
+              if [ -z "$ANDROID_SDK_ROOT" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; then
+                echo "ERROR: no Android SDK (ANDROID_SDK_ROOT='$ANDROID_SDK_ROOT') — this image lacks it."; exit 1
+              fi
+              export ANDROID_HOME="$ANDROID_SDK_ROOT"
+              export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+              # NDK (native/build.sh needs the clang cross-compiler; the linker
+              # flag it passes handles 16 KB alignment, so any NDK works).
+              export ANDROID_NDK_HOME="$(ls -d "$ANDROID_SDK_ROOT"/ndk/* "$ANDROID_SDK_ROOT"/ndk-bundle 2>/dev/null | sort -V | tail -1)"
+              if [ -z "$ANDROID_NDK_HOME" ]; then
+                echo "no NDK in image — installing ndk;27.0.12077973 via sdkmanager"
+                # `yes | …` gets SIGPIPE when sdkmanager exits; under pipefail that
+                # aborts the step even though the install succeeded. Drop pipefail
+                # for these two and rely on the post-check below.
+                set +o pipefail
+                yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null 2>&1 || true
+                yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --install "ndk;27.0.12077973"
+                set -o pipefail
+                export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+              fi
+              [ -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" ] || { echo "ERROR: NDK not usable at $ANDROID_NDK_HOME"; exit 1; }
+              echo "NDK: $ANDROID_NDK_HOME"
+
+              # ── Native crypto (.so, arm64, 16 KB aligned) ──
+              ./native/build.sh android
+
+              # ── Release signing (materialise the gitignored keystore) ──
+              set +x   # STOP tracing — no keystore/passwords in the log from here
+              : "${ANDROID_KEYSTORE_BASE64:?set ANDROID_KEYSTORE_BASE64 repo var}"
+              echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/upload-keystore.jks
+              printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=upload-keystore.jks\n' \
+                "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_PASSWORD" "${ANDROID_KEY_ALIAS:-upload}" \
+                > android/key.properties
+
+              # ── Deps + .env (bakes the prod Supabase, same as the web build) ──
+              rm -rf ~/.pub-cache/git .dart_tool/package_graph.json .dart_tool/package_config.json
+              flutter pub get
+              printf 'SUPABASE_URL=%s\nSUPABASE_ANDROID_URL=%s\nSUPABASE_ANON_KEY=%s\nAPP_DOWNLOAD_BASE=%s\n' \
+                "${{SUPABASE_URL}}" "${{SUPABASE_URL}}" "${{SUPABASE_ANON_KEY}}" "https://chattr.at/api/updates/android" > .env
+
+              # ── Bound Gradle memory to fit the 8 GB step alongside the Dart
+              #    AOT compile (gen_snapshot). R8/minify is OFF, so Gradle needs
+              #    little heap; a big -Xmx just starves gen_snapshot → OOM. Trim
+              #    to 3g for this ephemeral CI checkout + no daemon. ──
+              sed -i -E 's/-Xmx[0-9]+[GgMm]/-Xmx3g/; s/-XX:MaxMetaspaceSize=[0-9]+[GgMm]/-XX:MaxMetaspaceSize=768m/' android/gradle.properties
+              printf '\norg.gradle.daemon=false\norg.gradle.workers.max=2\norg.gradle.parallel=false\n' >> android/gradle.properties
+              export GRADLE_OPTS="-Dorg.gradle.daemon=false"
+              # ── Parallelität festnageln: `nproc` lügt auf self-hosted ──
+              # Der Step-Container ist auch hier per cgroup gedeckelt, exakt wie
+              # auf BB Cloud: memory.max = 8 GiB, CpuQuota = 400000/100000 = 4
+              # CPUs. ABER: eine CPU-Quota drosselt nur den Durchsatz, sie ändert
+              # nicht, was `nproc` meldet — das käme aus dem Cpuset, und das ist
+              # leer. Der Container sieht also alle 8 Kerne des Hosts, während
+              # dieselbe Maschine auf BB Cloud nur 4 hat. Jedes Werkzeug, das
+              # seine Parallelität an nproc festmacht (cargo, ninja, make,
+              # JVM-Threadpools), startet hier doppelt so viele Worker in
+              # derselben 8-GB-Kiste. Gemessen ohne diese Zeilen: der Container
+              # klebt an seiner Decke, Gradle-Daemon weg.
+              # Auf BB Cloud sind die Werte harmlos — dort sind es ohnehin 4.
+              printf 'kotlin.compiler.execution.strategy=in-process\nkotlin.daemon.jvmargs=-Xmx1g\n' >> android/gradle.properties
+              # ActiveProcessorCount zieht die JVM auf die Quota herunter (GC-
+              # Threads, ForkJoinPool) — sonst rechnet sie weiter mit 8.
+              sed -i -E 's/(org\.gradle\.jvmargs=.*)/\1 -XX:ActiveProcessorCount=4/' android/gradle.properties
+              export CARGO_BUILD_JOBS=2 MAKEFLAGS=-j2 CMAKE_BUILD_PARALLEL_LEVEL=2
+
+              # ── Build (arm64 split → versionCode = build_number + 2000) ──
+              flutter build apk --release --split-per-abi --target-platform android-arm64 \
+                --build-name="$APP_VERSION" --build-number="$BUILD_NUMBER"
+              APK=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+              test -f "$APK"
+
+              # ── Verify: versionCode + it's the established upload key ──
+              AAPT2=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/aapt2 | sort -V | tail -1)
+              VC=$("$AAPT2" dump badging "$APK" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
+              echo "built versionCode=$VC (expected $EXPECTED_VC)"
+              [ "$VC" = "$EXPECTED_VC" ] || { echo "versionCode mismatch — refusing to publish"; exit 1; }
+              # Use apksigner (reads APK Signature Scheme v2/v3); keytool -jarfile
+              # only sees the legacy v1 JAR signature, which Flutter release APKs
+              # don't carry → it read empty and false-flagged a "debug key".
+              APKSIGNER=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+              FP=$("$APKSIGNER" verify --print-certs "$APK" 2>/dev/null | sed -n 's/.*SHA-256 digest: *//p' | head -1 | tr -d ': ' | tr 'A-F' 'a-f')
+              echo "signing cert sha256=$FP"
+              case "$FP" in
+                7f28*146b) echo "cert OK (upload key)";;
+                *) echo "UNEXPECTED signing cert '$FP' — refusing to publish (debug key / wrong keystore?)"; exit 1;;
+              esac
+
+              # Die verifizierte APK geht als Artefakt an den Publish-Step. Der
+              # CMS-Ingest passiert bewusst NICHT hier: er muss NACH dem Deploy
+              # laufen, damit nie eine APK herunterladbar ist, bevor die
+              # Migration existiert, die sie erwartet.
+              cp "$APK" chattr.apk
+              echo "✓ APK gebaut + verifiziert (versionCode $EXPECTED_VC) — Veröffentlichung folgt nach dem Deploy"
+            } 2>&1 | tee "${BITBUCKET_CLONE_DIR:-.}/pipe.log"
+        artifacts:
+          - chattr.apk
+        after-script:
+          # Erfolg meldet der Publish-Step — hier nur bei Fehler.
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" failure-only
+
+    # Veröffentlicht die gebaute APK im CMS. Aus dem Build-Step herausgelöst,
+    # damit der Build PARALLEL zum Web-Build laufen kann, das Veröffentlichen
+    # aber strikt NACH `Deploy to VPS` bleibt.
+    #
+    # Beide Guards überspringen absichtlich, statt zu scheitern: Der schlimmste
+    # Ausgang eines Fehlers hier muss „nichts veröffentlicht" sein, niemals
+    # „falsches veröffentlicht".
+    - step: &publish-apk
+        name: Publish Android APK
+        image: atlassian/default-image:3
+        script:
+          - |
+            set -eo pipefail
+            {
+              # Kein Artefakt = der Build-Step ist an seinem Downgrade-Guard
+              # ausgestiegen (kein Versions-Bump). Nichts zu tun, kein Fehler.
+              if [ ! -f chattr.apk ]; then
+                echo "Kein APK-Artefakt — Build-Step hat übersprungen (kein Versions-Bump). Nichts zu veröffentlichen."
+                exit 0
+              fi
+              apt-get update && apt-get install -y jq curl
+              APP_VERSION=$(jq -r '.app_version' version.json)
+              BUILD_NUMBER=$(jq -r '.build_number' version.json)
+              BACKEND_VERSION=$(jq -r '.backend_version' version.json)
+              EXPECTED_VC=$((BUILD_NUMBER + 2000))   # --split-per-abi arm64 offset
+
+              # Erneut prüfen, was tatsächlich ausgeliefert wird. Schützt einen
+              # Re-Run einer alten Pipeline davor, ein veraltetes Artefakt über
+              # ein neueres Release zu schieben.
+              SERVED_VC=$(curl -fsSL "https://chattr.at/api/updates/android/manifest.json?u=$(date +%s)" 2>/dev/null | jq -r '.version_code // 0' 2>/dev/null || echo 0)
+              echo "ausgeliefert=$SERVED_VC, Artefakt=$EXPECTED_VC"
+              if [ "$EXPECTED_VC" -le "$SERVED_VC" ]; then
+                echo "Ausgeliefert ist bereits $SERVED_VC ≥ $EXPECTED_VC — nichts zu veröffentlichen."
+                exit 0
+              fi
+
+              # ── Register the release in the CMS (chattr.at = host + registry) ──
+              # The CMS stores the APK as a Craft asset and serves the update
+              # manifest at /api/updates/android/manifest.json — no separate
+              # download host, no static manifest.json. `backend_version` reist
+              # mit, damit das CMS den Landing-Footer aktuell hält
+              # (UpdatesController::_syncFooterVersions).
+              SHA=$(sha256sum chattr.apk | cut -d' ' -f1)
+              HTTP=$(curl -sS -o ingest.out -w '%{http_code}' -X POST "https://chattr.at/api/releases" \
+                -H "X-Ingest-Token: $CMS_INGEST_TOKEN" \
+                -F apk=@chattr.apk \
+                -F "metadata={\"platform\":\"android\",\"app_version\":\"$APP_VERSION\",\"backend_version\":\"$BACKEND_VERSION\",\"build_number\":$BUILD_NUMBER,\"version_code\":$EXPECTED_VC,\"sha256\":\"$SHA\",\"changelog_url\":\"https://bitbucket.org/Gerry3010/chattr/src/main/CHANGELOG.md\",\"channel\":\"stable\"}")
+              echo "CMS ingest → HTTP $HTTP"; cat ingest.out; echo
+              [ "$HTTP" = "200" ] || { echo "CMS ingest failed"; exit 1; }
+              echo "✓ Registered release in CMS (versionCode $EXPECTED_VC)"
+            } 2>&1 | tee "${BITBUCKET_CLONE_DIR:-.}/pipe.log"
+        after-script:
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" always
+
+pipelines:
+  # Every push on any branch (incl. pull requests) gets analyzed + tested.
+  # Semgrep SAST runs in parallel and is non-blocking (won't gate anything).
+  default:
+    - parallel:
+        - step: *analyze-and-test
+        - step: *security-fast
+
+  branches:
+    main:
+      # Gate the build/deploy behind a green analyze + test run. security-fast
+      # runs alongside but never blocks the deploy (its steps use `|| true`).
+      - parallel:
+          - step: *analyze-and-test
+          - step: *security-fast
+      # Web und Android hängen nicht voneinander ab und liefen deshalb ab dem
+      # 2026-08-04 parallel. Zurückgenommen am 2026-08-05: die Box trägt es
+      # nicht. Beide Schritte reservieren 8 GB, die Maschine hat 15, und in
+      # Lauf #590 und #592 starb jeweils der eine, während der andere lief —
+      # #591 dazwischen, allein gelaufen, war grün.
+      #
+      # Der Fehler sah dabei NICHT nach Speichermangel aus, sondern nach
+      # `No space left on device` (`:jni:createFullJarRelease`,
+      # `:app:compileReleaseKotlin`) — obwohl der Host 217 GB frei hatte und
+      # Inodes reichlich. Unter cgroup v2 zählen tmpfs-Seiten gegen das
+      # Speicherlimit des Containers; ist es erreicht, scheitern Schreibvorgänge
+      # mit ENOSPC statt mit einem OOM-Kill. Dieselbe Ursache erklärt auch den
+      # kaputten Gradle-Cache davor: abgeschnittene Jars entstehen genau so.
+      #
+      # Serialisieren kostet Wanduhrzeit, aber eine Pipeline, die bei jedem
+      # zweiten Lauf umfällt, kostet mehr. Vor einem erneuten Parallelisieren
+      # müsste die Maschine wachsen, nicht die Reservierung schrumpfen.
+      #
+      # Unverändert: *publish-apk läuft erst NACH dem Deploy, damit nie eine
+      # APK herunterladbar ist, bevor die Migration existiert, die sie erwartet.
+      - step: *build-web
+      - step: *build-apk
+      - step: *deploy-vps
+      - step: *publish-apk
+
+    # Auto-deploy every push to the persistent, ISOLATED staging stack (own
+    # Supabase + web root on the VPS under /home/chattr/staging — never touches
+    # prod at /home/chattr/app). Lets in-flight feature work be click-tested on
+    # staging before it reaches main/prod. build-staging builds web against the
+    # STAGING Supabase; deploy-staging ships it and runs migrations on the
+    # staging DB only. The same steps are also exposed as a manual/scheduled
+    # `custom: deploy-staging` (e.g. to push main's code to staging).
+    staging:
+      - step: *build-staging
+      - step: *deploy-staging
+
+  # Full weekly security sweep. Trigger via a Bitbucket schedule
+  # (Repo Settings → Pipelines → Schedules, or `bb schedule`): weekly, main.
+  # All four scans run in parallel; a single pipepush notification (pipeline
+  # "security-scan") summarizes the findings afterwards. govulncheck runs here
+  # (weekly) rather than per-push — its value is CVE currency, and the tiny
+  # native crypto module rarely changes between pushes.
+  custom:
+    weekly-full-security-scan:
+      - parallel:
+          - step: *security-fast
+          - step: *trivy-scan
+          - step: *govulncheck-scan
+          - step: *zap-baseline
+      - step: *pipepush-notify
+
+    # Update the persistent staging environment (build web against staging
+    # Supabase → ship to the VPS staging stack). Trigger: `bb run main
+    # --pattern deploy-staging`, or add a schedule. See docs/STAGING_SETUP.md.
+    deploy-staging:
+      - step: *build-staging
+      - step: *deploy-staging
+
+    # Baut die Android-APK auf Abruf UND veröffentlicht sie — dieselben zwei
+    # Steps wie im main-Deploy, nur ohne den Deploy dazwischen. Genau deshalb
+    # NUR benutzen, wenn der passende Backend-Stand schon draußen ist: sonst
+    # ist eine APK herunterladbar, bevor die Migration existiert, die sie
+    # erwartet. `bb run <branch> --pattern build-apk`.
+    build-apk:
+      - step: *build-apk
+      - step: *publish-apk
+
+    # Dasselbe, aber NUR bauen — kein Publish-Step, also strukturell unmöglich,
+    # dass hier etwas veröffentlicht wird. `APK_FORCE_BUILD=1` übergeht den
+    # Downgrade-Guard, damit der Build ohne Versions-Bump durchläuft; zum
+    # Iterieren am Build selbst (Toolchains, Runner, Speicher).
+    #   bb run <branch> --pattern build-apk-dryrun --var APK_FORCE_BUILD=1
+    # Das --var ist Pflicht: `default:` unten füllt nur das Web-Formular vor,
+    # ein API-Trigger schickt die Variable sonst gar nicht mit.
+    build-apk-dryrun:
+      - variables:
+          - name: APK_FORCE_BUILD
+            default: "1"
+      - step: *build-apk

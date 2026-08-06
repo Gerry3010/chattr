@@ -1,0 +1,17 @@
+# Trivy-Ausnahmen. Jede Zeile braucht eine Begruendung — eine Ignore-Liste ohne
+# Begruendungen ist nach einem halben Jahr nur noch eine Liste vergessener Funde.
+#
+# Regel: Hier gehoert NUR hinein, was sich nicht beheben laesst UND uns
+# nachweislich nicht betrifft. Alles, was ein Versionssprung loesen wuerde,
+# wird gesprungen, nicht ignoriert.
+
+# GO-2026-5932 — "golang.org/x/crypto/openpgp ist unmaintained und unsicher".
+# Nicht behebbar: die Meldung haengt am MODUL golang.org/x/crypto, nicht an einer
+# Version; das Go-Vuln-DB fuehrt sie mit "Fixed in: N/A", weil das openpgp-PAKET
+# aufgegeben wurde. Betrifft uns nicht: native/chattr_crypto importiert aus
+# diesem Modul ausschliesslich `golang.org/x/crypto/hkdf` (crypto.go:41),
+# openpgp kommt im gesamten Go-Code nicht vor. govulncheck — das im Gegensatz zu
+# Trivy prueft, ob der verwundbare Pfad tatsaechlich AUFGERUFEN wird — meldet
+# entsprechend 0 betroffene Stellen.
+# Sollte der Go-Kern jemals OpenPGP anfassen, muss diese Zeile weg.
+GO-2026-5932

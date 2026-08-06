@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Privacy manifest injected into webcrypto.framework (bundled BoringSSL /
+	     openssl_grpc), which Apple flags under ITMS-91061 for shipping without
+	     one. The webcrypto package (0.6.1, latest) builds this framework via
+	     Dart native assets and provides no manifest, so we supply a minimal,
+	     accurate one: BoringSSL is a pure cryptography library — it does not
+	     track, collects no data, and uses no required-reason APIs. Injected and
+	     re-signed by the Runner target's "Inject webcrypto Privacy Manifest"
+	     build phase. -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array/>
+</dict>
+</plist>
