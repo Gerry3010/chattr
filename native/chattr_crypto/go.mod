@@ -3,7 +3,7 @@ module chattr_crypto
 go 1.26
 
 require (
-	github.com/cloudflare/circl v1.6.3
+	github.com/cloudflare/circl v1.6.5
 	golang.org/x/crypto v0.54.0
 )
 
