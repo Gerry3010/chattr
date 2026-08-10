@@ -38,7 +38,7 @@ dependencies:
 
   # State Management (Riverpod 3 — StateNotifier/StateProvider come from the
   # riverpod legacy library; full Notifier migration is a separate task)
-  flutter_riverpod: ^3.3.2
+  flutter_riverpod: ^3.4.2
   flutter_hooks: ^0.21.3
   hooks_riverpod: ^3.3.2
 
@@ -60,20 +60,20 @@ dependencies:
   archive: ^4.0.9
 
   # Supabase
-  supabase_flutter: ^2.3.0
+  supabase_flutter: ^2.17.1
 
   # Chat UI
   chatview: ^3.0.0
 
   # QR
   qr_flutter: ^4.1.0
-  mobile_scanner: ^7.0.0
+  mobile_scanner: ^7.4.0
 
   # Sharing (13.x needs win32 ^6, which stable file_picker <12 can't share)
   share_plus: ^12.0.0
 
   # File / image picking (avatars; media sharing) — cross-platform
-  file_picker: ^11.0.2
+  file_picker: ^11.0.3
 
   # In-app camera capture (attach menu; Android/iOS only)
   image_picker: ^1.2.1
@@ -82,7 +82,7 @@ dependencies:
   record: ^7.1.1
 
   # JetBrains Mono for the terminal/Matrix theme
-  google_fonts: ^8.1.0
+  google_fonts: ^8.2.1
 
   # SVG theme wallpapers (chat background)
   flutter_svg: ^2.0.10+1
@@ -121,7 +121,7 @@ dependencies:
   # Pre-send media editing (all platforms). Pure-Flutter image editor:
   # crop/rotate/flip, paint incl. blur/pixelate censoring, text, filters, tune,
   # emoji, sticker. Bytes-in/bytes-out → slots into the caption/preview stage.
-  pro_image_editor: ^13.2.0
+  pro_image_editor: ^13.3.0
   # JPEG EXIF-orientation bake before the metadata strip (iOS photos arrive
   # sideways otherwise). Was already a transitive dep via pro_image_editor.
   image: ^4.1.2
@@ -137,7 +137,7 @@ dependencies:
   chatview_utils: ^3.0.0
 
   # Utils
-  uuid: ^4.4.0
+  uuid: ^4.6.0
   # CommonMark parser for the safe markdown message subset (lib/features/markdown).
   # Pure Dart, AST only — we render a restricted, safe subset ourselves (no raw
   # HTML, no external images), so nothing untrusted is ever fetched/rendered.
@@ -168,15 +168,15 @@ dependencies:
   intl: ^0.20.2 # used directly by core/utils/app_time.dart (DateFormat)
 
   # Push Notifications
-  firebase_core: ^4.3.0
-  firebase_messaging: ^16.1.0
+  firebase_core: ^4.13.0
+  firebase_messaging: ^16.5.0
   flutter_local_notifications: ^22.0.1
   # Direkt genutzt vom Push-Renderer im Hintergrund-Isolate: das ist der
   # einzige Speicher, an den ein FCM-Wakeup ohne AppInit herankommt.
   shared_preferences: ^2.5.3
   # App-icon badge reset (iOS setBadgeCount / Android launcher badge). Used by
   # FCMService.clearDeliveredNotifications() to drop the icon badge to 0.
-  app_badge_plus: ^1.2.5
+  app_badge_plus: ^1.3.3
   ffi: ^2.2.0
   cryptography: ^2.9.0
   # SHA-512 for the identity safety-number (iterated fingerprint, audit P0-a).
@@ -187,7 +187,7 @@ dependencies:
   bip39: ^1.0.6
   # UI automation (debug only, MarionetteBinding in main.dart).
   # Pinned to the installed marionette_mcp server version.
-  marionette_flutter: 0.5.0
+  marionette_flutter: 0.6.0
   share_handler: ^0.0.25
   # Rich clipboard read for composer paste (Ctrl/Cmd+V image/file) — Flutter's
   # Clipboard is text-only. Native layer builds via Rust (cargokit): desktop/
@@ -242,7 +242,7 @@ dev_dependencies:
   # Code Generation
   build_runner: ^2.15.0
   freezed: ^3.2.5
-  json_serializable: ^6.14.0
+  json_serializable: ^6.14.1
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
