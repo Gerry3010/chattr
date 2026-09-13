@@ -1,0 +1,6 @@
+# Test runner config. The `integration` tag marks tests that need a live local
+# Supabase stack (`supabase start`); CI runs `flutter test --exclude-tags
+# integration` so unit + native-FFI tests still run without the backend.
+tags:
+  integration:
+    description: Requires a live local Supabase stack.

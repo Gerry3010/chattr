@@ -1,0 +1,18 @@
+{
+  "name": "Profanity (EN)",
+  "description": "Common English profanity — substring, case-insensitive. Scans usernames / group names only, never messages; produces review signals (no auto-ban). Derived from the public LDNOOBW list; curate for your community.",
+  "source": "preset",
+  "_provenance": "Subset adapted from LDNOOBW (github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words).",
+  "terms": [
+    { "pattern": "fuck", "category": "profanity" },
+    { "pattern": "shit", "category": "profanity" },
+    { "pattern": "asshole", "category": "profanity" },
+    { "pattern": "bitch", "category": "profanity" },
+    { "pattern": "cunt", "category": "profanity" },
+    { "pattern": "dickhead", "category": "profanity" },
+    { "pattern": "motherfucker", "category": "profanity" },
+    { "pattern": "bastard", "category": "profanity" },
+    { "pattern": "whore", "category": "profanity" },
+    { "pattern": "slut", "category": "profanity" }
+  ]
+}

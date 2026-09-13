@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Filter bewusst entfernt: flutter_svg zeichnet feGaussianBlur/feColorMatrix
+     nicht, und die Filterregion des Exporters war ohne filterUnits ohnehin
+     kaputt (siehe landing/assets/icons/logo-nobg.svg). Der Schatten kommt in
+     der App aus Flutter, auf der Landing aus CSS. -->
+  <defs>
+    <clipPath id="clip_path_1">
+      <rect width="1024" height="1024" />
+    </clipPath>
+    <path id="path_2" d="M100.258 284.951C100.258 127.577 244.514 0 422.464 0C600.414 0 744.669 127.577 744.669 284.951C744.669 442.325 600.414 569.899 422.464 569.899C417.877 569.899 413.313 569.815 408.772 569.647L173.209 569.647C154.747 597.81 70.7432 616.354 20.413 625.147C-0.753725 628.845 -6.09848 618.37 7.38996 601.644C29.8764 573.76 59.1379 532.11 59.1379 504.186L100.258 285.478C100.258 285.302 100.258 285.127 100.258 284.951L100.258 284.951Z" />
+    <linearGradient id="gradient_3" gradientUnits="userSpaceOnUse" x1="372.335" y1="0" x2="372.335" y2="625.889">
+      <stop offset="0" stop-color="#FFFFFF" />
+      <stop offset="1" stop-color="#3A6D8E" />
+    </linearGradient>
+    <clipPath id="clip_path_5">
+      <rect width="1024" height="1024" />
+    </clipPath>
+    <path id="path_6" d="M0 47.586C0 21.305 21.1845 0 47.317 0C73.4494 0 94.6339 21.305 94.6339 47.586C94.6339 73.8671 73.4494 95.1721 47.317 95.1721C21.1845 95.1721 0 73.8671 0 47.586Z" />
+    <radialGradient id="gradient_7" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="1" gradientTransform="matrix(12.393 24.926 -43.82 21.786 34.924 22.66)">
+      <stop offset="0.315" stop-color="#FFFFFF" />
+      <stop offset="0.421" stop-color="#000000" stop-opacity="0.298" />
+    </radialGradient>
+    <path id="path_8" d="M462.654 0C222.109 0 24.4056 162.425 1.78896 370.172C-0.596315 392.083 -0.596314 427.919 1.78893 449.829C23.1427 645.978 200.577 801.722 422.786 818.503C444.763 820.162 480.546 820.162 502.523 818.503C589.475 811.937 669.571 784.095 736.14 740.878C754.626 728.877 756.039 705.057 740.504 689.423L661.891 610.308C646.357 594.674 619.743 593.24 600.471 603.933C571.212 620.168 538.019 631.386 502.44 636.222C480.602 639.19 444.707 639.19 422.869 636.222C313.227 621.32 226.238 545.798 207.215 449.654C202.937 428.034 202.937 391.968 207.215 370.347C226.238 274.205 313.227 198.684 422.869 183.783C444.707 180.814 480.602 180.814 502.44 183.783C537.81 188.59 570.823 199.705 599.957 215.787C619.252 226.437 645.891 224.971 661.426 209.337L740.043 130.221C755.578 114.587 754.151 90.7857 735.65 78.8081C659.106 29.2527 564.738 0 462.654 0Z" />
+  </defs>
+  <g>
+    <g />
+    <g>
+      <g clip-path="url(#clip_path_1)">
+        <g transform="translate(141.035 227)">
+          <!-- filter removed: the exporter's filter region lacked filterUnits
+               (defaults to objectBoundingBox), blowing it up ~745x — iOS
+               Safari/WebKit dropped the whole filtered subtree, leaving only
+               the two eye dots. The drop shadow comes from CSS instead. -->
+          <g>
+            <use p7:href="#path_2" fill="#FFFFFF" fill-rule="evenodd" xmlns:p7="http://www.w3.org/1999/xlink" />
+            <use p7:href="#path_2" fill="url(#gradient_3)" fill-rule="evenodd" fill-opacity="0.39" xmlns:p7="http://www.w3.org/1999/xlink" />
+          </g>
+        </g>
+      </g>
+    </g>
+    <g>
+      <g clip-path="url(#clip_path_5)">
+        <g transform="translate(100.995 101)">
+          <g transform="translate(313.343 343.89)">
+            <use p7:href="#path_6" fill="#396B8C" fill-rule="evenodd" xmlns:p7="http://www.w3.org/1999/xlink" />
+            <use p7:href="#path_6" fill="url(#gradient_7)" fill-rule="evenodd" fill-opacity="0.83" xmlns:p7="http://www.w3.org/1999/xlink" />
+          </g>
+          <g transform="translate(517.257 343.89)">
+            <use p7:href="#path_6" fill="#396B8C" fill-rule="evenodd" xmlns:p7="http://www.w3.org/1999/xlink" />
+            <use p7:href="#path_6" fill="url(#gradient_7)" fill-rule="evenodd" fill-opacity="0.83" xmlns:p7="http://www.w3.org/1999/xlink" />
+          </g>
+          <g>
+            <use p7:href="#path_8" fill="#FFFFFF" fill-rule="evenodd" xmlns:p7="http://www.w3.org/1999/xlink" />
+            <use p7:href="#path_8" fill="url(#gradient_3)" fill-rule="evenodd" fill-opacity="0.3" xmlns:p7="http://www.w3.org/1999/xlink" />
+          </g>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>

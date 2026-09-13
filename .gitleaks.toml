@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# gitleaks configuration — a NARROW allowlist, not a mute button.
+#
+# Why it exists: the weekly full-history scan reported 41 findings, three
+# Mondays in a row, and every single one was false. A crypto repository is full
+# of long base64 blobs, and the default rules cannot tell an ML-KEM test vector
+# from an API key. An alarm that always fires and is always wrong teaches one to
+# skip the whole report — which is exactly how the real finding gets missed. The
+# same lesson is already written into fcm_service.dart about a Semgrep rule.
+#
+# Every entry below names a CONCRETE value or path, verified by hand on
+# 2026-09-13 — not a category, not a whole rule, not a whole source directory.
+# A real key committed into lib/ or test/ still trips the scan; the
+# counter-check for that is scripts/ci/gitleaks-selftest.sh.
+#
+# One thing this file deliberately does NOT cover: the Firebase web api key
+# in android/app/google-services.json, web/index.html and
+# web/firebase-messaging-sw.js. CI scans the public mirror, where the
+# publisher deletes the first file and rewrites the key in the other two to
+# YOUR_FIREBASE_API_KEY — so an entry here would be dead weight there and
+# would fail the publisher's own safety sweep besides. The two web files
+# carry an inline `gitleaks:allow` so a LOCAL full-tree scan is clean too;
+# google-services.json is JSON and cannot, which is why a local scan still
+# reports exactly that one file. That is correct: locally it holds the real
+# key.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Verified-benign matches (checked by hand, 2026-09-13)"
+
+# Interop test vectors. These files exist to be byte-identical across three
+# crypto implementations, so their contents are published on purpose — that is
+# the whole point of a cross-implementation fixture.
+paths = [
+  '''web_crypto/testdata/''',
+  # CocoaPods writes a SHA1 per pod into these. A 40-hex checksum is not a
+  # credential, and the files are generated — nothing else lives in them.
+  '''^(ios|macos)/Podfile\.lock$''',
+]
+
+regexes = [
+  # Documentation placeholders: "Authorization: Bearer YOUR_SERVICE_ROLE_KEY".
+  '''^YOUR_[A-Z0-9_]+$''',
+
+
+  # Names of secure-storage keys, not their contents.
+  '''^encryption_key(_gated)?_v1(_exists)?$''',
+
+  # Constant names in the KEM code — X25519_PUB_LEN is a length, not a key.
+  '''^(X25519_PUB_LEN|recipX25519Pub)$''',
+
+  # The demo tokens that ship with `supabase start`. Pinned to the payload
+  # `{"iss":"supabase-demo"`, so a token from a REAL project does not match.
+  '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJpc3MiOiJzdXBhYmFzZS1kZW1v''',
+
+  # The PEM header in a test that generates its key at runtime
+  # (crypto.subtle.generateKey). The literal is the header, not a key.
+  '''^-----BEGIN PRIVATE KEY-----''',
+
+  # The name of a secure-storage key in the keychain probe, not its contents.
+  '''^m6m7_acl_probe$''',
+
+  # supabase-docker/.env.example is the STOCK self-hosting template from
+  # Supabase, committed unchanged (see 8e29cfd). Its demo tokens and its
+  # "please change me" passwords are published in Supabase's own docs. Pinned
+  # to the exact values, so a real credential pasted into that file still
+  # trips the scan.
+  '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE$''',
+  '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJzZXJ2aWNlX3JvbGUiLAogICAgImlzcyI6ICJzdXBhYmFzZS1kZW1vIiwKICAgICJpYXQiOiAxNjQxNzY5MjAwLAogICAgImV4cCI6IDE3OTk1MzU2MDAKfQ.DaYlNEoUrrEn2Ig7tqibS-PHK5vgusbcbo7X36XVt4Q$''',
+  '''^this_password_is_insecure_and_should_be_updated$''',
+  '''^your-super-secret-and-long-postgres-password$''',
+  '''^UpNVntn3cDxHJpq99YMc1T1AQgQpc8kfYTuRgBiYa15BLrx8etQoXz3gZv1/u2oq$''',
+
+  # Dummy fixtures, decoded and read: "abcdefghijklmnopqrstuvwxyz123456"
+  # and "thumbkey".
+  '''^(YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=|dGh1bWJrZXk=)$''',
+]

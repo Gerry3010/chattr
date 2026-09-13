@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net> -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<resources>
+    <!-- Tint Android applies to the notification icon and the app name in the
+         shade. Chattr's primary light (see landing/assets/css/style.css). -->
+    <color name="notification_accent">#559CAD</color>
+    <!-- Launch screen. Brand colours, not theme colours: the app has a theme
+         picker, so no single splash can match what comes after it. These match
+         the website (landing/assets/css/style.css) and the app icon. -->
+    <color name="splash_background">#F5F7FA</color>
+</resources>

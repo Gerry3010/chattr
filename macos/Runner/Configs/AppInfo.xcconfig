@@ -1,0 +1,29 @@
+// Application-level settings for the Runner target.
+//
+// This may be replaced with something auto-generated from metadata (e.g., pubspec.yaml) in the
+// future. If not, the values below would default to using the project name when this becomes a
+// 'flutter create' template.
+
+// The application's name. By default this is also the title of the Flutter window.
+PRODUCT_NAME = chattr
+
+// The application's bundle identifier
+PRODUCT_BUNDLE_IDENTIFIER = net.geraldhofbauer.chattr
+
+// The copyright displayed in application information
+PRODUCT_COPYRIGHT = Copyright © 2026 net.geraldhofbauer. All rights reserved.
+
+// Apple Developer Team (GERALD HOFBAUER) — required so the app is signed with a
+// development certificate that grants the keychain-access-groups entitlement
+// (flutter_secure_storage under the macOS sandbox). Overrides the project-level
+// ad-hoc ("-") identity for the Runner target.
+DEVELOPMENT_TEAM = ND9MT2PP6B
+CODE_SIGN_IDENTITY = Apple Development
+
+// Build macOS arm64-only (all our macOS users are on Apple Silicon). This drops
+// the x86_64 slice, which webcrypto's bundled BoringSSL cannot cross-compile from
+// Apple Silicon (undefined `_fiat_p256_adx_mul` — the P-256 ADX asm isn't
+// assembled for x86_64). Flutter's macos_assemble.sh forwards $(ARCHS) as
+// -dDarwinArchs, so excluding x86_64 here makes the native-asset (webcrypto)
+// hooks build arm64-only too — not just xcodebuild.
+EXCLUDED_ARCHS = x86_64

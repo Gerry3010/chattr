@@ -1,0 +1,91 @@
+Chattr 1.5.3+2020 · android · release · 53 lines
+────────────────────────────────
+2026-07-19T01:58:14.405308 DEBUG [:] Biometric authentication available: [BiometricType.weak, BiometricType.strong]
+2026-07-19T01:58:14.450596 INFO  [:] Supabase initialized: Instance of 'Supabase'
+2026-07-19T01:58:14.466604 INFO  [:] Firebase initialized
+2026-07-19T01:58:14.483349 ERROR [:] Failed to initialize FCM
+                              Error: PlatformException(invalid_icon, The resource @mipmap/ic_launcher could not be found. Please make sure it has been added as a drawable resource to your Android head project., null, null)
+Stack trace:
+#0      StandardMethodCodec.decodeEnvelope (package:flutter/src/services/message_codecs.dart:653)
+#1      MethodChannel._invokeMethod (package:flutter/src/services/platform_channel.dart:366)
+<asynchronous suspension>
+#2      AndroidFlutterLocalNotificationsPlugin.initialize (package:flutter_local_notifications/src/platform_flutter_local_notifications.dart:167)
+<asynchronous suspension>
+#3      FCMService._initializeLocalNotifications (package:chattr/features/push_notifications/fcm_service.dart:237)
+<asynchronous suspension>
+#4      FCMService.initialize (package:chattr/features/push_notifications/fcm_service.dart:171)
+<asynchronous suspension>
+#5      AppInit._initializeFCM (package:chattr/core/init/app_init.dart:217)
+<asynchronous suspension>
+#6      AppInit.initialize (package:chattr/core/init/app_init.dart:104)
+<asynchronous suspension>
+#7      _bootstrap (package:chattr/main.dart:75)
+<asynchronous suspension>
+#8      main (package:chattr/main.dart:30)
+<asynchronous suspension>
+
+2026-07-19T01:58:14.484352 ERROR [:] Failed to initialize FCM
+                              Error: PlatformException(invalid_icon, The resource @mipmap/ic_launcher could not be found. Please make sure it has been added as a drawable resource to your Android head project., null, null)
+Stack trace:
+#0      StandardMethodCodec.decodeEnvelope (package:flutter/src/services/message_codecs.dart:653)
+#1      MethodChannel._invokeMethod (package:flutter/src/services/platform_channel.dart:366)
+<asynchronous suspension>
+#2      AndroidFlutterLocalNotificationsPlugin.initialize (package:flutter_local_notifications/src/platform_flutter_local_notifications.dart:167)
+<asynchronous suspension>
+#3      FCMService._initializeLocalNotifications (package:chattr/features/push_notifications/fcm_service.dart:237)
+<asynchronous suspension>
+#4      FCMService.initialize (package:chattr/features/push_notifications/fcm_service.dart:171)
+<asynchronous suspension>
+#5      AppInit._initializeFCM (package:chattr/core/init/app_init.dart:217)
+<asynchronous suspension>
+#6      AppInit.initialize (package:chattr/core/init/app_init.dart:104)
+<asynchronous suspension>
+#7      _bootstrap (package:chattr/main.dart:75)
+<asynchronous suspension>
+#8      main (package:chattr/main.dart:30)
+<asynchronous suspension>
+
+2026-07-19T01:58:14.486050 DEBUG [:] Session found
+2026-07-19T01:58:14.626687 DEBUG [:] User found: 37b99fbc-d921-4ba1-9720-7a34223e2204
+2026-07-19T01:58:14.692362 WARN  [:] Biometric authentication failed
+                              Error: LocalAuthException(code authInProgress, null, null)
+2026-07-19T01:58:14.694433 INFO  [:] refreshToken: token obtained (fuEMA-m0TNi1...)
+2026-07-19T01:58:14.781134 INFO  [:] Device token saved for user 37b99fbc-d921-4ba1-9720-7a34223e2204 on android
+2026-07-19T01:58:14.781479 INFO  [:] Device token saved (fuEMA-m0TNi1...)
+2026-07-19T01:58:14.781710 INFO  [:] FCM token re-registered for restored session
+2026-07-19T01:58:16.727427 INFO  [GlobalMessageHandler] GlobalMessageHandler initialized for user 37b99fbc-d921-4ba1-9720-7a34223e2204
+2026-07-19T01:58:16.784786 INFO  [ChatsController] refreshChats: server returned 1 chat(s)
+2026-07-19T01:58:16.794207 DEBUG [:] Inserted Chat #015f509f-786c-4ff9-a8a4-67e0529347dd? Res: 48
+2026-07-19T01:58:16.822269 INFO  [GlobalMessageHandler] Reconciled sent receipts: 1 row(s), 0 updated
+2026-07-19T01:58:18.918296 INFO  [EventBus] Realtime channel re-subscribed — catching up
+2026-07-19T01:58:18.922476 INFO  [ChatsController] refreshChats: server returned 1 chat(s)
+2026-07-19T01:58:18.996767 DEBUG [:] Inserted Chat #015f509f-786c-4ff9-a8a4-67e0529347dd? Res: 49
+2026-07-19T01:58:19.026809 INFO  [GlobalMessageHandler] Reconciled sent receipts: 1 row(s), 0 updated
+2026-07-19T01:58:19.050655 INFO  [ChatsController] refreshChats: server returned 1 chat(s)
+2026-07-19T01:58:19.090037 DEBUG [:] Inserted Chat #015f509f-786c-4ff9-a8a4-67e0529347dd? Res: 50
+2026-07-19T01:58:19.118923 INFO  [GlobalMessageHandler] Reconciled sent receipts: 1 row(s), 0 updated
+2026-07-19T01:58:20.486603 INFO  [GlobalMessageHandler] 📥 Processed message 448d0e66-7826-42ef-90ae-ebbd7b8085a5 for chat 015f509f-786c-4ff9-a8a4-67e0529347dd
+2026-07-19T01:58:20.497971 DEBUG [:] Inserted Chat #015f509f-786c-4ff9-a8a4-67e0529347dd? Res: 51
+2026-07-19T01:58:20.498993 DEBUG [ChatsController] Updated chat 015f509f-786c-4ff9-a8a4-67e0529347dd metadata: lastMessageAt=2026-07-18T23:58:20.417385Z, unreadCount=4
+2026-07-19T01:58:20.521604 INFO  [:] Subscribed to typing indicators for chat: 015f509f-786c-4ff9-a8a4-67e0529347dd
+2026-07-19T01:58:20.534637 INFO  [MessagesController] Fetching missed messages from server for chat 015f509f-786c-4ff9-a8a4-67e0529347dd (since: 2026-07-18 23:53:59.079302Z)
+2026-07-19T01:58:20.572109 DEBUG [:] Messages: [{id: 448d0e66-7826-42ef-90ae-ebbd7b8085a5, chat_id: 015f509f-786c-4ff9-a8a4-67e0529347dd, sender_id: null, recipient_id: 37b99fbc-d921-4ba1-9720-7a34223e2204, encrypted_content: , message_type: system, created_at: 2026-07-18T23:58:20.368+00:00, received_at: 2026-07-18T23:58:20.544241+00:00, read_at: null, updated_at: 2026-07-18T23:58:20.544241+00:00, reply_to_message_id: null, reply_to_sender_name: null, reply_to_preview: null, reply_to_sender_id: null, expires_at: null, edited_at: null}, {id: ed5d702a-4772-42e5-946f-c6d253de3a0d, chat_id: 015f509f-786c-4ff9-a8a4-67e0529347dd, sender_id: null, recipient_id: 37b99fbc-d921-4ba1-9720-7a34223e2204, encrypted_content: , message_type: system, created_at: 2026-07-18T23:53:58.991+00:00, received_at: 2026-07-18T23:53:59.079302+00:00, read_at: 2026-07-18T23:53:59.649142+00:00, updated_at: 2026-07-18T23:53:59.649142+00:00, reply_to_message_id: null, reply_to_sender_name: null, reply_to_preview: null, reply_to_sender_id: null, expires_at: null, edited_at: null}]
+2026-07-19T01:58:20.572458 INFO  [MessagesController] Found 2 messages on server
+2026-07-19T01:58:20.589123 DEBUG [:] Skipping message 448d0e66-7826-42ef-90ae-ebbd7b8085a5: encrypted_content is empty (already processed)
+2026-07-19T01:58:20.589426 DEBUG [:] Skipping message ed5d702a-4772-42e5-946f-c6d253de3a0d: encrypted_content is empty (already processed)
+2026-07-19T01:58:20.599611 INFO  [MessagesController] Finished syncing missed messages (watermark → 2026-07-18 23:58:20.544241Z)
+2026-07-19T01:58:20.626260 DEBUG [:] Inserted Chat #015f509f-786c-4ff9-a8a4-67e0529347dd? Res: 52
+2026-07-19T01:58:20.626599 DEBUG [ChatsController] Reset unread count for chat 015f509f-786c-4ff9-a8a4-67e0529347dd
+2026-07-19T01:58:20.632583 DEBUG [:] Inserted Chat #015f509f-786c-4ff9-a8a4-67e0529347dd? Res: 53
+2026-07-19T01:58:20.632965 DEBUG [ChatsController] Reset unread count for chat 015f509f-786c-4ff9-a8a4-67e0529347dd
+2026-07-19T01:58:20.661408 DEBUG [:] Fetched reaction summaries for 8 messages
+2026-07-19T01:58:20.661794 DEBUG [:] Loaded reactions for 0/8 messages with reactions
+2026-07-19T01:58:20.669300 INFO  [MessagesController] ✓ Marked message as read: 448d0e66-7826-42ef-90ae-ebbd7b8085a5
+2026-07-19T01:58:20.787600 INFO  [MediaMessageView] 📎 Decrypted image pasted.png (137126 bytes)
+2026-07-19T02:04:49.269922 INFO  [EventBus] Realtime channel re-subscribed — catching up
+2026-07-19T02:04:49.371547 INFO  [ChatsController] refreshChats: server returned 1 chat(s)
+2026-07-19T02:04:49.416872 DEBUG [:] Inserted Chat #015f509f-786c-4ff9-a8a4-67e0529347dd? Res: 54
+2026-07-19T02:04:49.452126 INFO  [GlobalMessageHandler] Reconciled sent receipts: 1 row(s), 0 updated
+2026-07-19T02:04:49.473478 INFO  [ChatsController] refreshChats: server returned 1 chat(s)
+2026-07-19T02:04:49.514723 DEBUG [:] Inserted Chat #015f509f-786c-4ff9-a8a4-67e0529347dd? Res: 55
+2026-07-19T02:04:49.540557 INFO  [GlobalMessageHandler] Reconciled sent receipts: 1 row(s), 0 updated

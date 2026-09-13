@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Nicht verfügbar in deiner Region — Chattr</title>
+<style>
+  :root {
+    --primary-dark: #435E81;
+    --primary-light: #559CAD;
+    --accent: #E8836B;
+    --bg: #FFFFFF;
+    --card: #F5F7FA;
+    --text: #435E81;
+    --muted: #6B7280;
+    --line: rgba(67, 94, 129, .16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1f2e;
+      --card: #242b3d;
+      --text: #e2e8f0;
+      --muted: #a0aec0;
+      --line: rgba(255, 255, 255, .12);
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+  main { max-width: 34rem; width: 100%; }
+  .mark {
+    display: inline-block;
+    font-weight: 700;
+    letter-spacing: .02em;
+    font-size: 1.05rem;
+    color: var(--primary-light);
+    margin-bottom: 28px;
+  }
+  h1 {
+    font-size: clamp(1.4rem, 4vw, 1.9rem);
+    line-height: 1.25;
+    text-wrap: balance;
+    margin-bottom: 14px;
+  }
+  p { color: var(--muted); margin-bottom: 14px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    padding: 16px 18px;
+    margin: 24px 0;
+  }
+  .card p:last-child { margin-bottom: 0; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 32px 0 24px; }
+  [lang="en"] h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  a { color: var(--primary-light); }
+  footer { margin-top: 32px; font-size: .82rem; color: var(--muted); }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .85em;
+  }
+</style>
+</head>
+<body>
+<main>
+  <span class="mark">Chattr</span>
+
+  <h1>Chattr wird in deiner Region nicht angeboten.</h1>
+
+  <p>
+    Chattr ist ein Ein-Personen-Projekt. Ich biete es bewusst nur innerhalb der
+    Europäischen Union an — und derzeit nicht in Frankreich, weil dort für
+    Verschlüsselungsdienste zusätzliche Anforderungen gelten, die ich nicht
+    seriös erfüllen kann.
+  </p>
+
+  <div class="card">
+    <p>
+      Das ist keine Sperre gegen dich, sondern eine Grenze, die ich mir selbst
+      setze: Ich möchte nur dort anbieten, wo ich die Regeln auch wirklich
+      einhalten kann.
+    </p>
+  </div>
+
+  <p>
+    Wenn du eine bestehende Chattr-Installation nutzt, funktioniert sie weiter.
+    Betroffen ist nur diese Website.
+  </p>
+
+  <p>
+    Fragen? <a href="mailto:info@geraldhofbauer.net">info@geraldhofbauer.net</a>
+  </p>
+
+  <hr>
+
+  <section lang="en">
+    <h2>English</h2>
+    <p>
+      Chattr is a one-person project, offered only within the European Union
+      and currently not in France, where encryption services face additional
+      requirements I cannot properly meet.
+    </p>
+    <p>
+      This is not a block aimed at you — it is a limit I set myself: I only
+      want to offer Chattr where I can actually follow the rules.
+    </p>
+    <p>
+      An existing Chattr installation keeps working. Only this website is
+      affected.
+    </p>
+  </section>
+
+  <footer>HTTP 451 — Unavailable For Legal Reasons</footer>
+</main>
+</body>
+</html>

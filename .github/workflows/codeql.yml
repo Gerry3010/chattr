@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# CodeQL — GitHub-native SAST for JavaScript/TypeScript (mcp_server, web_crypto,
+# supabase/functions, landing JS). Runs in `build-mode: none` — it analyzes
+# source directly and compiles nothing. The mirror intentionally runs NO builds
+# (no app/APK/web builds): only security scans + a build guide (docs/BUILDING.md).
+# Dart is covered by Semgrep; the Go crypto core by govulncheck + Semgrep.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 3 * * 1" # Monday 03:27 UTC
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-extended
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
