@@ -1,0 +1,8 @@
+// Base xcconfig for the Notification Service Extension.
+//
+// The extension is NOT a CocoaPods target, so it must NOT inherit
+// Pods-Runner / Pods-ShareExtension. It only needs Flutter's build variables —
+// specifically FLUTTER_BUILD_NAME / FLUTTER_BUILD_NUMBER, which the extension's
+// Info.plist uses for CFBundleShortVersionString / CFBundleVersion so its
+// version always matches the app (an App Store requirement).
+#include "Generated.xcconfig"

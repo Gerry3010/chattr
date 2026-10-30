@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Claude security review on pull requests. Beyond the pattern-based scanners
+# (CodeQL/Semgrep/Trivy), this reviews each PR against Chattr's *product*
+# security invariants — the promises that make an E2E privacy app trustworthy
+# and that a linter can't check. Requires the ANTHROPIC_API_KEY repo secret
+# (env-only, never committed). Skips automatically on PRs from forks, which
+# don't receive secrets.
+name: Claude security review
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  security-review:
+    name: Claude security review
+    # Skip wherever the secret is unavailable, so the job does not stand red for
+    # a reason it can never fix:
+    #  * fork PRs — GitHub withholds secrets from them by design.
+    #  * Dependabot PRs — same wall, different door. They run with Dependabot's
+    #    own secret store and get no OIDC token, so the action fails at
+    #    "Failed to get OIDC token" before it reads a single line of the diff.
+    #    Six of six failed that way (2026-09-13). A dependency bump does not
+    #    need a review of Chattr's crypto invariants anyway — and a check that
+    #    is permanently red teaches one to stop reading it, which is exactly
+    #    how the one that matters gets missed.
+    if: >-
+      ${{ github.event.pull_request.head.repo.full_name == github.repository
+          && github.actor != 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude security review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are reviewing this pull request for Chattr, an end-to-end
+            encrypted, post-quantum (X25519 + ML-KEM-768) chat app. The server
+            stores ciphertext only and MUST never be able to read message
+            content. Review ONLY the changes in this PR and flag anything that
+            weakens a core security invariant. Be concise; report findings as
+            PR review comments anchored to the offending lines. If nothing is
+            wrong, say so briefly.
+
+            Invariants to check (report any regression, however subtle):
+            1. NO BACKDOOR / server stays content-blind: no server-side path
+               that decrypts, logs, or exfiltrates message plaintext, keys, or
+               private key material. Moderation must act on metadata only
+               (message_id, chat_id, timestamps, counts) plus server-plaintext
+               identifiers (usernames, chat names) — never message bodies.
+            2. NEVER client-side scanning (CSS / "Chat Control"): no code that
+               scans, hashes, or classifies message content on the client.
+            3. RLS intact: recipients change message status only via the
+               dedicated SECURITY DEFINER RPCs, never direct content writes;
+               aggregate/admin RPCs REVOKE EXECUTE FROM public/authenticated;
+               no RPC leaks another user's rows.
+            4. Envelope integrity: v4/v5 identity signature + AAD binding to
+               chat_id‖sender_id‖message_id must not be dropped or downgraded;
+               no silent PQ→classical downgrade; the hybrid-only scheme byte
+               stays enforced.
+            5. Secrets: no hardcoded keys, tokens, passwords, service-role keys,
+               or the ADMIN_STATS_SECRET in committed code — env-only.
+            6. Admin/moderation surface: the admin-stats gate secret is added
+               server-side (never reaches the browser); content reveal stays
+               gated at min(3,N) reporters or accused self-reveal.
+          claude_args: |
+            --allowed-tools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*)"
+            --max-turns 30

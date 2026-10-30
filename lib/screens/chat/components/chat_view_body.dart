@@ -1,0 +1,1521 @@
+// SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+import 'dart:async';
+
+import 'package:chatview/chatview.dart' as chatview;
+import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+
+import '../../../core/crypto/envelope_version.dart';
+import '../../../core/navigation/navigation_provider.dart';
+import '../../../core/theme/app_theme.dart';
+import '../../../core/theme/theme_controller.dart';
+import '../../../core/utils/app_time.dart';
+
+import '../../../features/chat_view/chat_view_controller.dart';
+import '../../../features/chat_view/bubble_gestures.dart';
+import '../../../features/chat_view/chat_view_reactions_adapter.dart';
+import '../../../features/reactions/double_tap_reaction_setting.dart';
+import '../../../features/messages/message_reactions_controller.dart';
+import '../../../features/chats/chats_controller.dart';
+import '../../../features/invites/invite_envelope.dart';
+import '../../../features/places/place_envelope.dart';
+import '../../../features/media/shot_envelope.dart';
+import '../../../features/media/widgets/shot_message_bubble.dart';
+import '../../../features/media/widgets/shot_viewer.dart';
+import '../../../features/media/clipboard_paste.dart';
+import '../../../features/media/composer_paste_menu.dart';
+import '../../../features/messages/inline_emoji.dart';
+import '../../../features/messages/edit_window.dart';
+import '../../../features/media/media_attachment.dart';
+import '../../../features/media/widgets/attach_menu.dart';
+import '../../../features/media/widgets/audio_recorder_button.dart';
+import '../../../features/media/widgets/media_album_view.dart';
+import '../../../features/media/widgets/media_message_view.dart';
+import '../../../features/mentions/mention_utils.dart';
+import '../../../features/mentions/self_mention_provider.dart';
+import '../../../features/messages/drafts_repository.dart';
+import '../../../features/messages/message_forward_service.dart';
+import '../../../features/profiles/profile_helpers.dart' show profileProvider;
+import '../../../features/messages/message_model.dart'
+    show Message, systemId, systemStateOf, sigStatusOf, sigStatusWarns;
+import '../../../features/messages/messages_controller.dart';
+import '../../../features/messages/outgoing_message.dart';
+import '../../../features/settings/markdown_bar_controller.dart';
+import '../../../features/messages/message_envelopes.dart';
+import '../../../features/messages/message_links.dart';
+import '../../../features/messages/message_ordering.dart';
+import '../../../features/messages/message_markdown.dart';
+import '../../../features/read_receipts/read_receipts_controller.dart';
+import '../../../features/reports/reports_repository.dart';
+import 'chat_view_app_bar.dart';
+import 'unsent_message_sheet.dart';
+import 'chat_view_textfield.dart';
+import 'scroll_to_bottom_button.dart';
+import 'forward_chat_sheet.dart';
+import 'invite_message_card.dart';
+import 'unsupported_message_card.dart';
+import 'place_message_cards.dart';
+import 'link_message_bubble.dart';
+import 'markdown_message_bubble.dart';
+import 'message_actions_sheet.dart';
+import 'reaction_details_sheet.dart';
+import 'text_selection_sheet.dart';
+import 'system_message_chip.dart';
+import 'timestamp_info.dart';
+import '../../../core/crypto/undecryptable_notice.dart';
+import 'undecryptable_message_card.dart';
+import '../../../core/network/network_errors.dart';
+
+/// The main body of the ChatViewScreen, containing the message list and text field.
+///
+/// It configures the `chatview.ChatView` widget with appropriate themes,
+/// behaviors, and callbacks, all managed by the [ChatViewController].
+class ChatViewBody extends ConsumerStatefulWidget {
+  final String chatId;
+
+  const ChatViewBody({super.key, required this.chatId});
+
+  @override
+  ConsumerState<ChatViewBody> createState() => _ChatViewBodyState();
+}
+
+class _ChatViewBodyState extends ConsumerState<ChatViewBody> {
+  final GlobalKey<State<chatview.ChatView>> _chatViewKey = GlobalKey();
+  final GlobalKey<ChatViewTextFieldState> _textFieldKey = GlobalKey();
+
+  Timer? _draftDebounce;
+  String? _pendingDraft;
+  late final DraftsRepository _draftsRepo;
+
+  @override
+  void initState() {
+    super.initState();
+    _draftsRepo = ref.read(draftsRepositoryProvider);
+    _restoreDraft();
+  }
+
+  /// Restores a saved draft into the composer once it is mounted.
+  Future<void> _restoreDraft() async {
+    final draft = await _draftsRepo.getDraft(widget.chatId);
+    if (draft == null || !mounted) return;
+    final fieldState = _textFieldKey.currentState;
+    if (fieldState != null) {
+      fieldState.seedDraft(draft);
+    } else {
+      // Composer not built yet (draft loads faster than the first frame).
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _textFieldKey.currentState?.seedDraft(draft);
+      });
+    }
+  }
+
+  /// Debounced persistence of composer text. Sending clears the field, which
+  /// arrives here as '' and deletes the draft — no explicit clear-on-send.
+  void _onDraftChanged(String text) {
+    _pendingDraft = text;
+    _draftDebounce?.cancel();
+    _draftDebounce = Timer(const Duration(milliseconds: 500), _flushDraft);
+  }
+
+  void _flushDraft() {
+    final text = _pendingDraft;
+    if (text == null) return;
+    _pendingDraft = null;
+    _draftsRepo.saveDraft(widget.chatId, text);
+  }
+
+  @override
+  void dispose() {
+    _draftDebounce?.cancel();
+    _flushDraft();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = ref.watch(chatViewControllerProvider(widget.chatId));
+    final controller = ref.read(
+      chatViewControllerProvider(widget.chatId).notifier,
+    );
+
+    final canSend = state.usernames.length > 1 && !state.isNotMember;
+
+    // Group members that can be @-mentioned (1.10): everyone but me, with a
+    // resolved username. Only in groups (>2 participants) — mentions are
+    // pointless in a 1:1 — so an empty list disables the composer typeahead.
+    final mentionCandidates = state.usernames.length > 2
+        ? [
+            // Group keywords first (@all / @admins / @members).
+            const MentionCandidate(id: '', username: mentionAll, isGroup: true),
+            const MentionCandidate(
+              id: '',
+              username: mentionAdmins,
+              isGroup: true,
+            ),
+            const MentionCandidate(
+              id: '',
+              username: mentionMembers,
+              isGroup: true,
+            ),
+            // `@agents` is offered only where it would reach someone. Unlike
+            // `@admins`, which every group has, a group without an agent
+            // account would just be shown a word that addresses nobody.
+            if (state.usernames.keys
+                .any((id) => ref.watch(profileProvider(id))?.isAgent ?? false))
+              const MentionCandidate(
+                id: '',
+                username: mentionAgents,
+                isGroup: true,
+              ),
+            for (final e in state.usernames.entries)
+              if (e.key != state.currentUserId && e.value.isNotEmpty)
+                MentionCandidate(id: e.key, username: e.value),
+          ]
+        : const <MentionCandidate>[];
+    final viewState = state.messages.isNotEmpty
+        ? chatview.ChatViewState.hasMessages
+        : chatview.ChatViewState.noData;
+
+    // Inline emojis inside a text bubble: a little above the body text so they
+    // don't read as too small, plus whatever the platform's emoji font needs
+    // (see inline_emoji.dart, measured per font). Derived from the theme's body
+    // size so it scales with each theme (the bubble textStyle sets no
+    // fontSize, so the body inherits bodyMedium). With an emoji style set, the
+    // fork keeps the line at the height of its text (p29). Emoji-ONLY messages
+    // are unaffected; they take the package's big-emoji path (default 30px).
+    final emojiInline = bubbleEmojiStyle(
+        Theme.of(context).textTheme.bodyMedium?.fontSize ?? 14);
+
+    final featureActiveConfig = chatview.FeatureActiveConfig(
+      enableTextField: !state.isPending && !state.isNotMember,
+      enableSwipeToReply: !state.isPending && !state.isNotMember,
+      // Long-press opens our unified message-actions sheet via the fork's clean
+      // ChatBubbleConfiguration.onLongPress (below) — no reaction popup and no
+      // reply-snackbar hijack needed.
+      enableReactionPopup: false,
+      enableReplySnackBar: false,
+      // The flag only arms the double tap; what it does is ours
+      // ([ChatBubbleConfiguration.onDoubleTap] wins over the package's heart,
+      // CHAT-15): a reaction on media, copy mode on text.
+      enableDoubleTapToLike: true,
+      enablePagination: true,
+      // Timestamps live INSIDE the bubbles (WhatsApp-style). Swipe-to-see-time
+      // is off for good: every bubble is wrapped in SwipeToReply's own
+      // horizontal-drag detector, which wins the gesture arena — the
+      // list-level time-reveal could only ever fire on empty background, so
+      // the times were effectively unreachable (and on web it fought the
+      // edge-swipe-back gesture on top).
+      showTimeInChatBubble: true,
+      enableSwipeToSeeTime: false,
+      // Show other users' self-chosen profile pictures next to their bubbles in
+      // ALL chats (1:1 and groups) — the picture is user-chosen, so there's no
+      // privacy reason to hide it. This was previously OFF because chatview
+      // collapses a picture-less user's avatar to 0px (the default-avatar
+      // fallback was unreachable when profilePhoto is null), which made the
+      // last grouped bubble jump to the far left. The fork p12 patch fixes that
+      // at the source: ProfileImageWidget now renders a deterministic initials
+      // circle when there is no image, so every incoming bubble keeps a stable
+      // avatar slot and groups still read as one block.
+      enableOtherUserProfileAvatar: true,
+      // chatview's own scroll-to-bottom button stays OFF: with our custom
+      // sendMessageBuilder its taps fall through to the message underneath. We
+      // render our own [ChatScrollToBottomButton] over the chat instead.
+      enableScrollToBottomButton: false,
+    );
+
+    // Theme wallpaper shown behind the messages, if the theme has one.
+    final appTheme = ref.watch(themeControllerProvider);
+    final wallpaper = appTheme.wallpaper;
+    // Forest keeps its wallpaper at natural exposure, so its bubbles get a
+    // subtle outline to separate them from the bright photo (Forest-only — the
+    // other themes' bubbles stay borderless).
+    final isForest = appTheme == AppTheme.forest;
+    final bubbleScheme = Theme.of(context).colorScheme;
+    final Border? outgoingBubbleBorder = isForest
+        ? Border.all(
+            color: bubbleScheme.onPrimaryContainer.withValues(alpha: 0.22),
+            width: 1,
+          )
+        : null;
+    final Border? incomingBubbleBorder = isForest
+        ? Border.all(
+            color: bubbleScheme.onSurface.withValues(alpha: 0.16),
+            width: 1,
+          )
+        : null;
+    final chatBackgroundConfiguration = chatview.ChatBackgroundConfiguration(
+      backgroundColor: wallpaper != null
+          ? Colors.transparent
+          : Theme.of(context).colorScheme.surfaceContainerLowest,
+      // Render strictly by `createdAt` instead of trusting chatview's raw
+      // insertion order. Our controller mirrors the (correctly ordered)
+      // Riverpod message list into chatview via `ChatController.addMessage`,
+      // which always APPENDS to the tail — so a scrolled-up older page (and any
+      // out-of-order realtime arrival) landed among the newest messages and the
+      // conversation read jumbled. With `sortEnable` the list widget sorts every
+      // render, making insertion order irrelevant. `groupedListOrder` stays at
+      // its default `asc`, so this comparator's output order IS the final order.
+      sortEnable: true,
+      // Stable total order: newest→oldest by time, message id as deterministic
+      // tiebreak (see message_ordering.dart). `created_at` alone isn't unique
+      // (ms/us collisions, mixed client-clock vs server-NOW() timestamps), and
+      // Dart's List.sort isn't stable — the id tiebreak removes the residual
+      // jitter without needing a chatview fork patch.
+      messageSorter: (a, b) =>
+          compareMessagesNewestFirst(a.createdAt, a.id, b.createdAt, b.id),
+      // Dragging the message list hides the keyboard (standard messenger
+      // behavior) — a fork addition that dismisses only on touch drag, not on
+      // mouse-wheel/programmatic scroll.
+      scrollViewKeyboardDismissBehavior:
+          ScrollViewKeyboardDismissBehavior.onDrag,
+    );
+
+    final markdownBarEnabled = ref.watch(markdownBarEnabledProvider);
+
+    // Paste a clipboard image/file through the media pipeline, prefilling the
+    // caption with whatever is already typed in the composer and clearing the
+    // composer once the media actually sends — same behaviour as the attach
+    // button (#6). Both paste entry points (Ctrl/Cmd+V and the long-press
+    // "paste") route through here so the typed text is never lost.
+    Future<bool> pasteWithComposerText() {
+      final typed = _textFieldKey.currentState?.text ?? '';
+      return pasteClipboardMedia(
+        context: context,
+        initialText: typed.trim().isEmpty ? null : typed,
+        onSend: ({
+          required items,
+          caption,
+          onProgress,
+          isCancelled,
+          quality,
+          asShot = false,
+        }) async {
+          await controller.sendMedia(
+            items: items,
+            caption: caption,
+            onProgress: onProgress,
+            isCancelled: isCancelled,
+            quality: quality,
+            asShot: asShot,
+          );
+          _textFieldKey.currentState?.clearText();
+        },
+      );
+    }
+
+    final sendMessageConfiguration = chatview.SendMessageConfiguration(
+      // We supply our own voice recorder via trailingActions (AudioRecorderButton).
+      // chatview's ChatUITextField *also* renders a built-in mic when
+      // allowRecordingVoice is true (its default) — that produced two mic icons.
+      // Disable the package one so only our recorder shows.
+      allowRecordingVoice: false,
+      // Ctrl/Cmd+V in the composer (fork feature): send a pasted image/file
+      // through the E2E media pipeline. Plain text is left to the field's
+      // native paste. Platform-gated in the fork (desktop/web on, mobile off);
+      // mobile pastes via the attach sheet's paste tile instead.
+      onPaste: canSend ? (_) => pasteWithComposerText() : null,
+      // Composer long-press menu: add a media "paste" entry when the clipboard
+      // holds an image/file (fork p9 passthrough). This is the mobile paste
+      // path — iOS has no Cmd+V and its native toolbar only pastes text, so a
+      // clipboard image otherwise looks un-pasteable (#92).
+      composerContextMenuBuilder: canSend
+          ? (menuContext, editableState) => buildComposerContextMenu(
+              menuContext,
+              editableState,
+              onPasteMedia: pasteWithComposerText,
+              markdownBarEnabled: markdownBarEnabled,
+              onToggleMarkdownBar: () =>
+                  ref.read(markdownBarEnabledProvider.notifier).toggle(),
+            )
+          : null,
+      textFieldBackgroundColor: Theme.of(context).colorScheme.surface,
+      defaultSendButtonColor: Theme.of(context).colorScheme.primary,
+      // replyMessageColor is the quoted TEXT color (not a background) — it
+      // previously got surfaceContainerHighest, which is near-invisible on the
+      // dialog surface in dark mode.
+      replyMessageColor: Theme.of(context).colorScheme.onSurfaceVariant,
+      replyDialogColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+      replyTitleColor: Theme.of(context).colorScheme.primary,
+      closeIconColor: Theme.of(context).colorScheme.onSurfaceVariant,
+      textFieldConfig: chatview.TextFieldConfiguration(
+        enabled: canSend,
+        hintText: 'chat_view.type_message'.tr(),
+        textStyle: TextStyle(color: Theme.of(context).colorScheme.onSurface),
+        // Keep the attach button visible while typing (fork default hides it).
+        hideLeadingActionsOnType: false,
+        // Left: a single attach button opening the WhatsApp-style share sheet
+        // (replaces chatview's default camera/gallery icons).
+        leadingActions: (ctx, ctrl) => canSend
+            ? [
+                IconButton(
+                  icon: const Icon(Icons.attach_file),
+                  tooltip: 'media.attach'.tr(),
+                  onPressed: () {
+                    // Prefill the caption sheet with whatever is already typed
+                    // in the composer (#6). The composer is cleared ONLY once
+                    // the media actually sends (onSend runs) — a cancelled
+                    // caption sheet keeps the typed text.
+                    final typed = _textFieldKey.currentState?.text ?? '';
+                    showAttachSheet(
+                      context: context,
+                      initialText: typed.trim().isEmpty ? null : typed,
+                      onSend:
+                          ({
+                            required items,
+                            caption,
+                            onProgress,
+                            isCancelled,
+                            quality,
+                            asShot = false,
+                          }) async {
+                            await controller.sendMedia(
+                              items: items,
+                              caption: caption,
+                              onProgress: onProgress,
+                              isCancelled: isCancelled,
+                              quality: quality,
+                              asShot: asShot,
+                            );
+                            _textFieldKey.currentState?.clearText();
+                          },
+                    );
+                  },
+                ),
+              ]
+            : const [],
+        // Right: only the voice recorder.
+        trailingActions: (ctx, ctrl) => [
+          AudioRecorderButton(onSend: controller.sendMedia, enabled: canSend),
+        ],
+        onMessageTyping: (status) {
+          controller.setTyping(status == chatview.TypeWriterStatus.typing);
+        },
+        compositionThresholdTime: const Duration(seconds: 2),
+      ),
+    );
+
+    // Favorited (#4) message ids, watched so the star badge appears/clears
+    // reactively when a message is (un)favorited.
+    final favoriteMessageIds = ref
+        .watch(messagesControllerProvider(widget.chatId))
+        .whereType<Message>()
+        .where((m) => m.isFavorite)
+        .map((m) => m.id)
+        .toSet();
+
+    final messageConfiguration = chatview.MessageConfiguration(
+      // Media and link messages are custom-rendered but fully reactable.
+      showReactionsOnCustomMessages: true,
+      customMessageBuilder: _customMessageBuilder(context, state),
+      // Star badge on favorited bubbles (fork p17, works across all types).
+      isMessageStarred: (chatview.Message m) =>
+          favoriteMessageIds.contains(m.id),
+      messageReactionConfig: chatview.MessageReactionConfiguration(
+        // Avatars in the reaction pill only carry information in a group. In a
+        // 1:1 there are exactly two possible reactors, so a circle beside
+        // every single 👍 is noise — the pill falls back to a bare count, and
+        // only once both of you reacted (fork p22).
+        showReactedUserAvatars: state.chat?.isGroup ?? false,
+        backgroundColor: Theme.of(context).colorScheme.surface,
+        borderColor: Theme.of(context).colorScheme.outline,
+        // Fully-round stadium pill: the package default (circular(16)) isn't
+        // round enough on a taller multi-emoji pill, which read as a rounded
+        // rectangle. A large radius + snug padding gives a clean pill.
+        borderRadius: BorderRadius.circular(999),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        // The "who reacted" sheet defaults to white cards + light-gray
+        // text — unreadable in dark mode. Style it from the theme.
+        reactionsBottomSheetConfig: chatview.ReactionsBottomSheetConfiguration(
+          backgroundColor: Theme.of(context).colorScheme.surface,
+          reactionWidgetDecoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            borderRadius: const BorderRadius.all(Radius.circular(10)),
+          ),
+          reactedUserTextStyle: TextStyle(
+            color: Theme.of(context).colorScheme.onSurface,
+            fontSize: 14,
+          ),
+          reactionSize: 18,
+        ),
+        // Take the pill tap over from the package (fork p24). Its own sheet
+        // can only look — it builds from an immutable snapshot and has no
+        // message id — so removing your own reaction there was impossible.
+        // The config above stays: without this callback the package sheet is
+        // still the fallback.
+        onReactionPillTap: (messageId) => _onReactionPillTap(state, messageId),
+      ),
+    );
+
+    final chatView = chatview.ChatView(
+      key: _chatViewKey,
+      chatController: controller.chatController,
+      // Jump-to-message + pulse from favorites / global search (fork p18).
+      highlightMessageNotifier: controller.highlightNotifier,
+      onSendTap: canSend
+          ? (message, replyMessage, messageType) async {
+              final messenger = ScaffoldMessenger.of(context);
+              try {
+                await controller.sendMessage(
+                  message,
+                  replyMessage: replyMessage,
+                );
+              } catch (e) {
+                // A failed send no longer lands here: it stays as a bubble
+                // with a red mark and "Erneut senden" (CHAT-66). This is only
+                // reached when nothing could be kept (no user, store locked),
+                // so the text goes back into the composer, as since CHAT-63.
+                if (messageType == chatview.MessageType.text) {
+                  _textFieldKey.currentState
+                      ?.restoreUnsent(message, replyMessage);
+                }
+                messenger.showSnackBar(
+                  SnackBar(content: Text('chat_view.send_failed_kept'.tr())),
+                );
+              }
+            }
+          : null,
+      sendMessageBuilder: (replyMessage) => ChatViewTextField(
+        key: _textFieldKey,
+        // chatview's swipe-to-reply sets the reply on ITS SendMessageWidget
+        // state and re-invokes this builder with it — forward it so our text
+        // field can adopt it (it was silently discarded before, which made
+        // swipe-to-reply a no-op).
+        pendingReply: replyMessage ?? const chatview.ReplyMessage(),
+        sendMessageConfig: sendMessageConfiguration,
+        onSendTap: _chatViewKey.currentState?.widget.onSendTap,
+        onDraftChanged: _onDraftChanged,
+        mentionCandidates: mentionCandidates,
+      ),
+      isLastPage: () => !state.hasMoreMessages,
+      loadMoreData: (direction, message) async {
+        if (direction == chatview.ChatPaginationDirection.previous) {
+          await controller.loadMoreMessages();
+        }
+      },
+      featureActiveConfig: featureActiveConfig,
+      chatViewState: viewState,
+      chatViewStateConfig: chatview.ChatViewStateConfiguration(
+        loadingWidgetConfig: chatview.ChatViewStateWidgetConfiguration(
+          loadingIndicatorColor: Theme.of(context).primaryColor,
+        ),
+        // Localize the empty state (was the package default "No message" /
+        // "Reload" English text); hide the non-functional reload button.
+        noMessageWidgetConfig: chatview.ChatViewStateWidgetConfiguration(
+          title: 'chat_view.no_messages'.tr(),
+          showDefaultReloadButton: false,
+        ),
+        onReloadButtonTap: () {},
+      ),
+      typeIndicatorConfig: chatview.TypeIndicatorConfiguration(
+        flashingCircleBrightColor: Theme.of(context).colorScheme.primary,
+        flashingCircleDarkColor: Theme.of(
+          context,
+        ).colorScheme.primary.withValues(alpha: 0.5),
+      ),
+      appBar: ChatViewAppBar(chatId: widget.chatId),
+      chatBackgroundConfig: chatBackgroundConfiguration,
+      sendMessageConfig: sendMessageConfiguration,
+      chatBubbleConfig: chatview.ChatBubbleConfiguration(
+        // Link messages render via LinkMessageBubble (compact favicon+title
+        // row). Keep the package's AnyLinkPreview card off everywhere as a
+        // safety net — if its URL regex catches something ours misses, the
+        // card would come back as a big empty white block.
+        disableLinkPreview: true,
+        onDoubleTap: (message) => _onDoubleTap(state, message),
+        onLongPress: (message) =>
+            _showMessageActions(controller, state, message),
+        // Slide-to-Timestamp (#107b): an opposite-direction swipe peeks the
+        // delivered/read time inline; in groups a hard swipe opens the
+        // per-recipient info sheet. Read times honour the reciprocal
+        // read-receipt privacy setting.
+        timestampRevealBuilder: (message) {
+          final m = _chattrMessage(state, message.id);
+          if (m == null) return null;
+          return buildTimestampRevealChip(
+            context: context,
+            message: m,
+            currentUserId: state.currentUserId,
+            showReadReceipts: ref.read(sendReadReceiptsProvider),
+          );
+        },
+        onSwipeToTimestamp: (state.chat?.isGroup ?? false)
+            ? (message) => _openTimestampInfo(state, message)
+            : null,
+        // System messages are notices, not bubbles from a participant. Fork p23
+        // lays them out full-width — the chip is centred on the CHAT instead of
+        // on the space left beside the avatar slot, which is what pushed it
+        // right, by a varying amount because the slot collapses on the last
+        // message of a group. It also drops the swipe wrapper: swiping a notice
+        // armed a reply that could never be sent. Long-press was already a no-
+        // op here (see _showMessageActions), so the two now agree.
+        isCenteredMessage: (message) => message.sentBy == systemId,
+        outgoingChatBubbleConfig: chatview.ChatBubble(
+          color: Theme.of(context).colorScheme.primaryContainer,
+          border: outgoingBubbleBorder,
+          // Less round than the package defaults (30 short / 18 long → short
+          // bubbles look near-pill). Fork p15 keeps the message-grouping corner
+          // chaining while letting us dial both radii. Tune these two values.
+          shortMessageBorderRadius: 16,
+          longMessageBorderRadius: 16,
+          textStyle: TextStyle(
+            color: Theme.of(context).colorScheme.onPrimaryContainer,
+          ),
+          // Inline emojis, see emojiInline above (fork p13/p29).
+          emojiStyle: emojiInline,
+          // The in-bubble timestamp defaults to a hardcoded Colors.white70 /
+          // Colors.black54 in the package — the incoming black54 is nearly
+          // invisible on the dark bubble in dark mode. Drive it from the theme.
+          messageTimeTextStyle: TextStyle(
+            color: Theme.of(
+              context,
+            ).colorScheme.onPrimaryContainer.withValues(alpha: 0.7),
+          ),
+          // Persistent WhatsApp-style status ticks on every own message.
+          // chatview's default receipt is only a transient send animation
+          // that removes itself after the message is sent — delivery/read
+          // state was never visible with it.
+          receiptsWidgetConfig: chatview.ReceiptsWidgetConfig(
+            showReceiptsIn: chatview.ShowReceiptsIn.all,
+            // With the message, so a send that failed can show its own mark
+            // and offer a retry for exactly that message (CHAT-66, fork p31).
+            messageReceiptsBuilder: _buildMessageReceipt,
+            // The package default renders hardcoded English
+            // ("Seen now" / "Seen 5 m ago") — localize it.
+            lastSeenAgoBuilder: _buildLastSeen,
+          ),
+          // Without an explicit linkStyle the URL TextSpan has no color at all
+          // and paints framework-default black — invisible on dark bubbles.
+          linkPreviewConfig: chatview.LinkPreviewConfiguration(
+            linkStyle: TextStyle(
+              color: Theme.of(context).colorScheme.onPrimaryContainer,
+              decoration: TextDecoration.underline,
+            ),
+          ),
+        ),
+        inComingChatBubbleConfig: chatview.ChatBubble(
+          color: Theme.of(context).colorScheme.surfaceContainerHigh,
+          border: incomingBubbleBorder,
+          // Match outgoing base radii (grouping corners preserved by fork p15).
+          shortMessageBorderRadius: 16,
+          longMessageBorderRadius: 16,
+          textStyle: TextStyle(color: Theme.of(context).colorScheme.onSurface),
+          emojiStyle: emojiInline,
+          // See outgoing: override the package's hardcoded Colors.black54
+          // timestamp, which is unreadable on the dark bubble in dark mode.
+          messageTimeTextStyle: TextStyle(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+          linkPreviewConfig: chatview.LinkPreviewConfiguration(
+            linkStyle: TextStyle(
+              color: Theme.of(context).colorScheme.primary,
+              decoration: TextDecoration.underline,
+            ),
+          ),
+        ),
+      ),
+      messageConfig: messageConfiguration,
+      profileCircleConfig: const chatview.ProfileCircleConfiguration(
+        profileImageUrl: null,
+      ),
+      repliedMessageConfig: chatview.RepliedMessageConfiguration(
+        backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+        verticalBarColor: Theme.of(context).colorScheme.primary,
+        // The quoted text defaults to Colors.black in the package — invisible
+        // on the dark surfaceContainerHighest background in dark mode.
+        textStyle: TextStyle(color: Theme.of(context).colorScheme.onSurface),
+        replyTitleTextStyle: TextStyle(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+          fontSize: 14,
+          letterSpacing: 0.3,
+        ),
+        micIconColor: Theme.of(context).colorScheme.onSurfaceVariant,
+        repliedMsgAutoScrollConfig: chatview.RepliedMsgAutoScrollConfig(
+          enableHighlightRepliedMsg: true,
+          highlightColor: Theme.of(
+            context,
+          ).colorScheme.secondaryContainer.withValues(alpha: 0.6),
+          // No scale bump — the instant 1.05 scale read as the bubble/view
+          // "stretching" weirdly. A colour-only pulse (blinked 3× in the fork)
+          // is cleaner.
+          highlightScale: 1.0,
+          // No spread at all any more — the blur alone makes the glow (Gerry,
+          // 2026-09-02).
+          //
+          // `spreadRadius` inflates the shadow area BEFORE blurring, so its
+          // effect arrives twice over: the pulse started at 8 and thereby
+          // reached further than the gap between two bubbles — it lit up the
+          // neighbours instead of pointing at ONE message. 2 was the first step
+          // back, 0 is the right one: a soft glow needs no hard core pumping it
+          // up first. Set here rather than left to the fork default, so that
+          // adjusting it is this one line and not a new tag.
+          highlightGlowSpread: 0,
+        ),
+        loadOldReplyMessage: (replyId) async {
+          while (state.hasMoreMessages) {
+            await controller.loadMoreMessages();
+            if (state.messages.any((m) => m.id == replyId)) {
+              break;
+            }
+          }
+        },
+      ),
+    );
+
+    // App-side "jump to end of chat" button. We render our OWN standalone,
+    // self-positioning widget instead of chatview's enableScrollToBottomButton:
+    // with a custom sendMessageBuilder the package button lands in a layer whose
+    // taps fall through to the message underneath (opens the tapped photo/video).
+    // The widget aligns + themes itself (see ChatScrollToBottomButton).
+    final scrollButton = Positioned.fill(
+      child: ChatScrollToBottomButton(
+        chatController: controller.chatController,
+        alignment: ChatScrollButtonAlignment.right,
+      ),
+    );
+
+    // Keyboard-on-scroll dismissal is now handled inside chatview via
+    // ChatBackgroundConfiguration.scrollViewKeyboardDismissBehavior (fork
+    // addition) — no NotificationListener wrapper needed here anymore.
+    if (wallpaper == null) {
+      return Stack(
+        children: [
+          Positioned.fill(child: chatView),
+          scrollButton,
+        ],
+      );
+    }
+    // Paint the theme wallpaper behind the (transparent) chat surface.
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ColoredBox(color: Theme.of(context).colorScheme.surfaceContainerLowest),
+        Positioned.fill(
+          child: wallpaper.endsWith('.svg')
+              ? SvgPicture.asset(wallpaper, fit: BoxFit.cover)
+              : Image.asset(wallpaper, fit: BoxFit.cover),
+        ),
+        Positioned.fill(child: chatView),
+        scrollButton,
+      ],
+    );
+  }
+
+  /// Localized "seen" line under the newest read message (replaces the
+  /// package default's hardcoded English "Seen now" / timeago strings).
+  Widget _buildLastSeen(chatview.Message message, String formattedDate) {
+    final readAt = message.createdAt;
+    final locale = context.locale.toString();
+    final String text;
+    if (AppTime.minutesAgo(readAt) < 1) {
+      text = 'chat_view.seen_now'.tr();
+    } else if (AppTime.isSameDayAsNow(readAt)) {
+      text = 'chat_view.seen_at'.tr(args: [AppTime.hm(readAt, locale)]);
+    } else {
+      text = 'chat_view.seen_at'.tr(args: [AppTime.dayHm(readAt, locale)]);
+    }
+    return Padding(
+      padding: const EdgeInsets.all(2),
+      child: Text(
+        '$text    ',
+        style: TextStyle(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+          fontSize: 12,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMessageReceipt(
+    chatview.Message message,
+    chatview.MessageStatus status,
+  ) {
+    if (sendStateOf(message) == LocalSendState.failed) {
+      return UnsentReceipt(onTap: () => _showUnsent(message));
+    }
+    return _buildReceipt(status);
+  }
+
+  /// Retry, copy or discard an own message the server does not have (CHAT-66).
+  void _showUnsent(chatview.Message message) {
+    final controller =
+        ref.read(chatViewControllerProvider(widget.chatId).notifier);
+    unawaited(showUnsentMessageSheet(
+      context,
+      failure: sendFailureOf(message),
+      sending: sendStateOf(message) == LocalSendState.pending,
+      onRetry: () => unawaited(controller.retrySend(message.id)),
+      onDiscard: () => unawaited(controller.discardUnsent(message.id)),
+      onCopy: () =>
+          unawaited(Clipboard.setData(ClipboardData(text: message.message))),
+    ));
+  }
+
+  /// Status ticks beside own bubbles: clock while pending, ✓ sent,
+  /// ✓✓ delivered, ✓✓ tinted once every recipient has read it.
+  Widget _buildReceipt(chatview.MessageStatus status) {
+    final scheme = Theme.of(context).colorScheme;
+    final (icon, color) = switch (status) {
+      chatview.MessageStatus.pending => (
+        Icons.access_time,
+        scheme.onSurfaceVariant,
+      ),
+      chatview.MessageStatus.undelivered => (
+        Icons.done,
+        scheme.onSurfaceVariant,
+      ),
+      chatview.MessageStatus.delivered => (
+        Icons.done_all,
+        scheme.onSurfaceVariant,
+      ),
+      chatview.MessageStatus.read => (Icons.done_all, scheme.primary),
+    };
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Icon(icon, size: 15, color: color),
+    );
+  }
+
+  /// View a shot — and burn it in the process. The burn hangs on the
+  /// **opening**, not on the closing: only if there really was something to see
+  /// is it spent (a network error must not cost it) — but then surely, without
+  /// it mattering how the viewer ends.
+  ///
+  /// With one's **own** shot nothing happens: no burn, no read mark. The sender
+  /// is checking what they sent — that is not an event anyone needs to learn
+  /// about, and certainly not one that may start the 24-hour clock on both
+  /// sides.
+  Future<void> _openShot(
+    String messageId,
+    ShotEnvelope shot, {
+    required bool own,
+  }) async {
+    await showShot(
+      context,
+      ref,
+      shot,
+      own: own,
+      onViewed: own
+          ? null
+          : () => ref
+              .read(chatViewControllerProvider(widget.chatId).notifier)
+              .shotWasViewed(messageId),
+    );
+  }
+
+  /// Long-press or double-tap on a bubble opens the unified message-actions
+  /// sheet. Which entries appear depends on ownership and message type.
+  /// Double tap on a bubble (Gerry, 2026-10-28, CHAT-15): a photo or video
+  /// gets the double-tap reaction (❤️ unless changed in the settings), a
+  /// second double tap takes it back; text opens copy mode. A caption is
+  /// already selectable text and takes its own double tap before this one.
+  void _onDoubleTap(ChatViewState state, chatview.Message message) {
+    final action = doubleTapActionFor(
+      isSystem: message.sentBy == systemId,
+      canInteract: !state.isPending && !state.isNotMember,
+      isMedia: MediaAttachment.tryParse(message.message) != null,
+      isText: message.messageType == chatview.MessageType.text ||
+          message.messageType == chatview.MessageType.custom,
+      isDecrypted: message.message != 'chat_view.encrypted'.tr(),
+      isEnvelope: isEnvelopeMessage(message.message),
+    );
+    switch (action) {
+      case DoubleTapAction.react:
+        unawaited(HapticFeedback.lightImpact());
+        unawaited(ChatViewReactionsAdapter(ref, widget.chatId).reactOrReport(
+          context,
+          messageId: message.id,
+          emoji: ref.read(doubleTapReactionProvider),
+        ));
+      case DoubleTapAction.copyMode:
+        unawaited(showTextSelectionSheet(context, message.message));
+      case DoubleTapAction.none:
+        break;
+    }
+  }
+
+  /// Tap on the reaction pill. In a group with a single kind of reaction it
+  /// joins in, or takes one's own back (CHAT-15); otherwise, and in every 1:1,
+  /// it opens the list of who reacted.
+  void _onReactionPillTap(ChatViewState state, String messageId) {
+    final summaries =
+        ref.read(chatReactionsProvider(widget.chatId))[messageId] ?? const [];
+    if (pillTapJoins(
+      isGroup: state.chat?.isGroup ?? false,
+      reactionKinds: summaries.length,
+      canInteract: !state.isPending && !state.isNotMember,
+    )) {
+      unawaited(HapticFeedback.selectionClick());
+      unawaited(ChatViewReactionsAdapter(ref, widget.chatId).reactOrReport(
+        context,
+        messageId: messageId,
+        emoji: summaries.single.reaction,
+      ));
+      return;
+    }
+    showReactionDetailsSheet(
+      context: context,
+      chatId: widget.chatId,
+      messageId: messageId,
+    );
+  }
+
+  void _showMessageActions(
+    ChatViewController controller,
+    ChatViewState state,
+    chatview.Message message,
+  ) {
+    if (message.sentBy == systemId) return;
+    // Not on the server yet: edit, delete for everyone or react would all
+    // address a message the server does not know (CHAT-66).
+    if (sendStateOf(message) != null) {
+      _showUnsent(message);
+      return;
+    }
+    if (state.isPending || state.isNotMember) return;
+
+    final isOwn = message.sentBy == state.currentUserId;
+    final isMedia = MediaAttachment.tryParse(message.message) != null;
+    // Link-containing texts are MessageType.custom (LinkMessageBubble) but
+    // behave like text for reply/copy/edit purposes.
+    final isText =
+        message.messageType == chatview.MessageType.text ||
+        (message.messageType == chatview.MessageType.custom && !isMedia);
+    // Cards whose body is a JSON envelope, not prose: an invitation, a shared
+    // place, a calendar entry. They read as text (custom type, no media), so
+    // they used to offer Edit and Copy — and both hand over the raw envelope:
+    // the edit box opens with `{"_chattr_event":1,…}` and saving it would
+    // break the card for every recipient. There is no meaningful "edit" for a
+    // pin someone dropped, so the entry goes away instead of being repaired.
+    // Reply and Forward stay: passing a place or an invitation on is exactly
+    // what they are for.
+    final isEnvelope = isEnvelopeMessage(message.message);
+    // A shot is the one message that must NOT be passed on: forwarding
+    // downloads the file again, encrypts it again and thereby creates a second,
+    // permanent copy — the opposite of what a shot promises. Replying stays
+    // (the quote only shows "📷 Shot"), deleting and reporting anyway.
+    final isShot = isShotMessage(message.message);
+    final canSend = state.usernames.length > 1 && !state.isNotMember;
+    // Undecrypted messages render the localized placeholder — nothing to
+    // forward or copy there.
+    final isDecrypted = message.message != 'chat_view.encrypted'.tr();
+    final caption = isMedia && !isShot
+        ? MediaAlbum.tryParse(message.message)?.caption
+        : null;
+
+    showMessageActionsSheet(
+      context: context,
+      ref: ref,
+      chatId: widget.chatId,
+      message: message,
+      onReply: canSend && (isText || isMedia) && !isShot
+          ? () => _textFieldKey.currentState?.assignReplyMessage(message)
+          : null,
+      onForward: (isText || isMedia) && isDecrypted && !isShot
+          ? () => _forwardMessage(message)
+          : null,
+      // A photo's caption is text like any other: copyable, and editable by
+      // whoever sent it (SeB, 2026-10-03). Not for a shot — its text is part
+      // of the picture and, like the picture, meant to be seen once.
+      copyText: isText && !isEnvelope
+          ? message.message
+          : (caption != null && caption.isNotEmpty ? caption : null),
+      onEdit: !isOwn || !_editStillAllowed(state, message)
+          ? null
+          : isText && !isEnvelope
+              ? () => _showEditDialog(context, controller, message)
+              : isMedia && !isShot && isDecrypted
+                  ? () => _showEditDialog(context, controller, message,
+                      caption: true)
+                  : null,
+      editLabelKey: isMedia ? 'chat_view.edit_caption' : 'chat_view.edit_message',
+      // Deleting now exists for EVERY message, other people's included — but
+      // then locally only. And never again without a prompt: deleting is the
+      // only action here that cannot be undone.
+      onDelete: () => _confirmDelete(context, controller, message,
+          isOwn: isOwn),
+      // "Info" → per-recipient delivered/read times (also the discoverable
+      // path in 1:1s, where the swipe only peeks). Only when the underlying
+      // message is loaded (has the receipt maps).
+      onInfo: _chattrMessage(state, message.id) != null
+          ? () => _openTimestampInfo(state, message)
+          : null,
+      // Report someone else's message (never your own). Data-minimal.
+      onReport: !isOwn ? () => _reportMessage(message) : null,
+    );
+  }
+
+  /// Report a message: a data-minimal flag. Only {message_id, chat_id, reason}
+  /// leaves the device — never content. The reported (accused) user keeps the
+  /// right to voluntarily reveal the message (see the self-reveal banner).
+  void _reportMessage(chatview.Message message) {
+    const reasons = ['spam', 'harassment', 'hate', 'inappropriate', 'other'];
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+              child: Text(
+                'chat_view.report_message'.tr(),
+                style: Theme.of(sheetContext).textTheme.titleLarge,
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Text(
+                'chat_view.report_consent'.tr(),
+                style: Theme.of(sheetContext).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(sheetContext).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            const Divider(height: 1),
+            for (final r in reasons)
+              ListTile(
+                title: Text('chat_view.report_reason_$r'.tr()),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _submitReport(message, r);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _submitReport(chatview.Message message, String reason) async {
+    try {
+      await ref
+          .read(reportsRepositoryProvider)
+          .reportUser(
+            reportedUserId: message.sentBy,
+            chatId: widget.chatId,
+            reason: reason,
+            messageId: message.id,
+          );
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('chat_view.report_sent'.tr())));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('chat_view.report_error'.tr())));
+    }
+  }
+
+  /// The underlying chattr message (with per-recipient received/read maps) for a
+  /// chatview bubble; null for system rows or if it scrolled out of the page.
+  /// Editing ends a day after sending, or ten minutes after the first read
+  /// (edit_window.dart). Past that the entry is gone rather than offered and
+  /// refused.
+  bool _editStillAllowed(ChatViewState state, chatview.Message message) {
+    final m = _chattrMessage(state, message.id);
+    return canEditMessage(
+      sentAt: m?.createdAt ?? message.createdAt,
+      firstReadAt: m == null ? null : firstReadOf(m.readAt),
+      now: DateTime.now(),
+    );
+  }
+
+  Message? _chattrMessage(ChatViewState state, String id) {
+    for (final m in state.messages) {
+      if (m.id == id && m is Message) return m;
+    }
+    return null;
+  }
+
+  /// Opens the per-recipient timestamp sheet for a bubble (Slide-to-Timestamp).
+  void _openTimestampInfo(ChatViewState state, chatview.Message message) {
+    final m = _chattrMessage(state, message.id);
+    if (m == null) return;
+    showTimestampInfoSheet(
+      context: context,
+      chatId: widget.chatId,
+      message: m,
+      usernames: state.usernames,
+      currentUserId: state.currentUserId,
+      showReadReceipts: ref.read(sendReadReceiptsProvider),
+    );
+  }
+
+  /// Forward a message: pick one or MORE target chats, then re-send text or
+  /// media into each (media is downloaded, decrypted and re-sent with a fresh
+  /// key). A single target gets a "Zum Chat" snackbar action to jump there.
+  Future<void> _forwardMessage(chatview.Message message) async {
+    final targetChatIds = await showForwardChatSheetMulti(
+      context: context,
+      excludeChatId: widget.chatId,
+    );
+    if (targetChatIds == null || targetChatIds.isEmpty || !mounted) return;
+
+    final forwardService = MessageForwardService(ref);
+    var forwarded = 0;
+    try {
+      final album = MediaAlbum.tryParse(message.message);
+      for (final targetChatId in targetChatIds) {
+        if (album != null) {
+          await forwardService.forwardAlbum(targetChatId, album);
+        } else {
+          await forwardService.forwardText(targetChatId, message.message);
+        }
+        forwarded++;
+      }
+      if (mounted) {
+        final single = targetChatIds.length == 1;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              single
+                  ? 'chat_view.forwarded'.tr()
+                  : 'chat_view.forwarded_multi'.tr(args: ['$forwarded']),
+            ),
+            // persist: false is MANDATORY as soon as an action hangs on it.
+            // Flutter sets `persist = persist ?? action != null` — so a
+            // SnackBar with an action button stays up FOREVER by default until
+            // somebody taps the action. A `duration` that has been set is
+            // silently ignored in that case.
+            persist: false,
+            // 8 instead of the usual 4 seconds: "to the chat" wants to be read
+            // and considered. No more — the notice sits above the input field,
+            // and whoever wants to keep typing swipes it away.
+            duration: const Duration(seconds: 8),
+            action: single
+                ? SnackBarAction(
+                    label: 'chats.open_chat'.tr(),
+                    onPressed: () {
+                      final chat = ref
+                          .read(chatsControllerProvider)
+                          .where((c) => c.id == targetChatIds.first)
+                          .firstOrNull;
+                      if (chat != null) {
+                        ref
+                            .read(navigationServiceProvider)
+                            .navigateToChat(chat);
+                      }
+                    },
+                  )
+                : null,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(isNetworkError(e)
+                ? 'errors.send_offline'.tr()
+                : 'chat_view.send_error'.tr(args: ['$e'])),
+          ),
+        );
+      }
+    }
+  }
+
+  /// Prompt before deleting — and the choice of HOW far it reaches.
+  ///
+  /// For one's own messages both: "for everyone" removes it at the other end
+  /// too (as long as they have not read it yet; after that the server holds
+  /// nothing any more), "only for me" merely tidies up this device. For other
+  /// people's messages there is only the latter — anything else would be an
+  /// authority over other people's holdings.
+  ///
+  /// Deleted locally means final, but without a tombstone: the catch-up run
+  /// only fetches rows with `received_at IS NULL`, and what this device already
+  /// has is marked received server-side. So it cannot come back.
+  Future<void> _confirmDelete(
+    BuildContext context,
+    ChatViewController controller,
+    chatview.Message message, {
+    required bool isOwn,
+  }) async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('chat_view.delete_title'.tr()),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('chat_view.delete_for_me_hint'.tr()),
+            if (isOwn) ...[
+              const SizedBox(height: 10),
+              Text('chat_view.delete_for_everyone_hint'.tr()),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('common.cancel'.tr()),
+          ),
+          TextButton(
+            key: const ValueKey('delete_for_me_button'),
+            onPressed: () => Navigator.pop(ctx, 'me'),
+            child: Text('chat_view.delete_for_me'.tr()),
+          ),
+          if (isOwn)
+            TextButton(
+              key: const ValueKey('delete_for_everyone_button'),
+              onPressed: () => Navigator.pop(ctx, 'all'),
+              child: Text(
+                'chat_view.delete_for_everyone'.tr(),
+                style: const TextStyle(color: Colors.red),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (choice == null) return;
+
+    try {
+      if (choice == 'all') {
+        await controller.deleteMessageForEveryone(message.id);
+      } else {
+        await controller.deleteMessageForMe(message.id);
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(isNetworkError(e)
+                ? 'errors.not_sent_offline'.tr()
+                : 'chat_view.delete_failed'.tr()),
+          ),
+        );
+      }
+    }
+  }
+
+  void _showEditDialog(
+    BuildContext context,
+    ChatViewController controller,
+    chatview.Message message, {
+    bool caption = false,
+  }) {
+    final original = caption
+        ? (MediaAlbum.tryParse(message.message)?.caption ?? '')
+        : message.message;
+    final editController = TextEditingController(text: original);
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(
+            (caption ? 'chat_view.edit_caption' : 'chat_view.edit_message')
+                .tr()),
+        content: TextField(
+          controller: editController,
+          autofocus: true,
+          maxLines: null,
+          decoration: InputDecoration(
+              hintText: (caption
+                      ? 'chat_view.caption_hint'
+                      : 'chat_view.type_message')
+                  .tr()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: Text('chat_view.cancel'.tr()),
+          ),
+          FilledButton(
+            onPressed: () async {
+              final newText = editController.text.trim();
+              Navigator.pop(dialogContext);
+              if (newText == original.trim()) return;
+              // A caption may be emptied (the photo stays); a message may not.
+              final String? body = caption
+                  ? replaceCaption(message.message, newText)
+                  : (newText.isEmpty ? null : newText);
+              if (body == null) return;
+              try {
+                await controller.editMessage(message.id, body);
+              } catch (e) {
+                if (context.mounted) {
+                  // The server keeps the last word on the edit window: it
+                  // knows read times this device may not (receipts off).
+                  final closed = '$e'.contains('edit_window_closed');
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(closed
+                          ? 'chat_view.edit_window_closed'.tr()
+                          : isNetworkError(e)
+                              ? 'errors.not_sent_offline'.tr()
+                              : 'chat_view.send_error'.tr(args: ['$e'])),
+                    ),
+                  );
+                }
+              }
+            },
+            child: Text('chat_detail.save_changes'.tr()),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget Function(chatview.Message) _customMessageBuilder(
+    BuildContext context,
+    ChatViewState state,
+  ) {
+    // Usernames highlighted as @mentions in text bubbles (1.10) — members plus,
+    // in groups, the @all/@admins/@members keywords.
+    final memberUsernames = memberMentionUsernames(state.usernames);
+    // Of those, the ones that mean ME — drawn with a tinted ground so „ich bin
+    // gemeint" is visible without reading the mention. Only ever passed for
+    // INCOMING bubbles: a message I wrote myself doesn't mean me, even when it
+    // says @all — same rule the chat-list @-marker follows.
+    final myTokens = ref.watch(selfMentionTokensProvider(widget.chatId));
+    Set<String> selfTokensFor(bool isOwn) => isOwn ? const {} : myTokens;
+    return (message) {
+      // "Unread messages" divider (#108) — a synthetic row, not a real message.
+      if (message.id == unreadDividerMessageId) {
+        final scheme = Theme.of(context).colorScheme;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: Divider(color: scheme.primary.withValues(alpha: 0.4)),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Text(
+                  'chat_view.unread_divider'.tr(),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.primary,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Divider(color: scheme.primary.withValues(alpha: 0.4)),
+              ),
+            ],
+          ),
+        );
+      }
+      // A message from a newer build than this one. Checked FIRST: it is a
+      // stand-in, not content, and must never fall through to a text bubble
+      // that would show the raw placeholder JSON.
+      final unsupported = UnsupportedEnvelopeNotice.tryParse(message.message);
+      if (unsupported != null) {
+        return UnsupportedMessageCard(
+          notice: unsupported,
+          isOwn: message.sentBy == state.currentUserId,
+        );
+      }
+      // A message this device cannot open: same rule, a stand-in before any
+      // other renderer could show its raw JSON.
+      final undecryptable = UndecryptableNotice.tryParse(message.message);
+      if (undecryptable != null) {
+        return UndecryptableMessageCard(notice: undecryptable);
+      }
+      // Group invitation (1.13): tappable join card, auto-approve server-side.
+      final invite = InviteEnvelope.tryParse(message.message);
+      if (invite != null) {
+        return _withTrustMarker(
+          message,
+          InviteMessageCard(
+            invite: invite,
+            isOwn: message.sentBy == state.currentUserId,
+          ),
+        );
+      }
+      // Shared pin (#70). No map tile is fetched — see LocationMessageCard.
+      final location = LocationEnvelope.tryParse(message.message);
+      if (location != null) {
+        return _withTrustMarker(
+          message,
+          LocationMessageCard(
+            location: location,
+            isOwn: message.sentBy == state.currentUserId,
+          ),
+          isOwn: message.sentBy == state.currentUserId,
+        );
+      }
+      // Shared calendar entry (#70) — read-only, writes to nobody's calendar.
+      final event = EventEnvelope.tryParse(message.message);
+      if (event != null) {
+        return _withTrustMarker(
+          message,
+          EventMessageCard(
+            event: event,
+            isOwn: message.sentBy == state.currentUserId,
+          ),
+          isOwn: message.sentBy == state.currentUserId,
+        );
+      }
+      // A shot (1.27): its own bubble, BEFORE the media check. The attachment
+      // sits in an envelope of its own so that `MediaAlbum.tryParse` does not
+      // find it — a shot must never render as an ordinary photo.
+      final shot = ShotEnvelope.tryParse(message.message);
+      if (shot != null) {
+        final isOwn = message.sentBy == state.currentUserId;
+        return _withTrustMarker(
+          message,
+          ShotMessageBubble(
+            shot: shot,
+            isOwn: isOwn,
+            // "Opened" is precisely the read receipt — a shot only counts as
+            // read once it has actually been viewed.
+            openedByPeer: message.status == chatview.MessageStatus.read,
+            onOpen: () => _openShot(message.id, shot, own: isOwn),
+          ),
+          isOwn: isOwn,
+        );
+      }
+      // Encrypted media message: a single attachment (image inline / file card)
+      // or a multi-item album mosaic (#109). Both carry the optional caption.
+      final album = MediaAlbum.tryParse(message.message);
+      if (album != null) {
+        final isOwn = message.sentBy == state.currentUserId;
+        // The fork stacks the reaction pill at bottom:0 of the custom widget
+        // (unlike text/image bubbles it reserves NO space) → on media it would
+        // overlap the content. Reserve bottom space when reactions exist so the
+        // overlaid pill lands below the media instead of on top of it.
+        final hasReactions = message.reaction.reactions.isNotEmpty;
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 4,
+            right: 4,
+            top: 2,
+            bottom: hasReactions ? 18 : 2,
+          ),
+          child: _withTrustMarker(
+            message,
+            album.isAlbum
+                ? MediaAlbumView(
+                    album: album,
+                    isOwn: isOwn,
+                    mentionUsernames: memberUsernames,
+                    selfMentionTokens: selfTokensFor(isOwn),
+                  )
+                : MediaMessageView(
+                    attachment: album.first,
+                    caption: album.caption,
+                    isOwn: isOwn,
+                    mentionUsernames: memberUsernames,
+                    selfMentionTokens: selfTokensFor(isOwn),
+                  ),
+            isOwn: isOwn,
+          ),
+        );
+      }
+      // Markdown-formatted text → render the safe subset. Before the link path
+      // so `[text](url)` renders as a formatted link (SafeMarkdown linkifies
+      // bare URLs itself, so plain http(s) stays tappable here too).
+      if (message.sentBy != systemId && hasMarkdown(message.message)) {
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: MarkdownMessageBubble(
+            message: message,
+            isOwn: message.sentBy == state.currentUserId,
+            mentionUsernames: memberUsernames,
+            selfMentionTokens: selfTokensFor(
+              message.sentBy == state.currentUserId,
+            ),
+          ),
+        );
+      }
+      // Text with URLs: compact favicon+title preview instead of chatview's
+      // AnyLinkPreview card. Gets the mention highlight too, so URL+mention
+      // keeps its preview card (previously it lost it to the markdown bubble).
+      if (message.sentBy != systemId &&
+          (extractUrls(message.message).isNotEmpty ||
+              extractEmails(message.message).isNotEmpty)) {
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: LinkMessageBubble(
+            message: message,
+            isOwn: message.sentBy == state.currentUserId,
+            chatId: widget.chatId,
+            mentionUsernames: memberUsernames,
+            selfMentionTokens: selfTokensFor(
+              message.sentBy == state.currentUserId,
+            ),
+          ),
+        );
+      }
+      // A plain message that @-mentions a member → the (chrome-identical)
+      // MarkdownMessageBubble highlights it (the package's default text
+      // bubble can't; the controller routes these to MessageType.custom).
+      if (message.sentBy != systemId &&
+          hasAnyMention(message.message, memberUsernames)) {
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: MarkdownMessageBubble(
+            message: message,
+            isOwn: message.sentBy == state.currentUserId,
+            mentionUsernames: memberUsernames,
+            selfMentionTokens: selfTokensFor(
+              message.sentBy == state.currentUserId,
+            ),
+          ),
+        );
+      }
+      if (message.sentBy == systemId) {
+        return SystemMessageChip(
+          text: message.message,
+          state: systemStateOf(message),
+        );
+      }
+      return Text(message.message);
+    };
+  }
+
+  /// Draws the warn-only trust marker ABOVE a structured bubble.
+  ///
+  /// Prose carries the marker inline in its text; a media, album or invite
+  /// envelope cannot — the whole message string has to stay parseable, because
+  /// that parse is what decides which bubble this is. So those get it here, as
+  /// a line of its own. Returns [child] untouched for a message whose signature
+  /// checked out (the overwhelming majority), so no layout changes for them.
+  static Widget _withTrustMarker(
+    chatview.Message message,
+    Widget child, {
+    bool isOwn = false,
+  }) {
+    final status = sigStatusOf(message);
+    // Crying wolf on the majority is worse than no marker at all — see
+    // [sigStatusWarns] for what this guard is protecting against.
+    if (!sigStatusWarns(status)) return child;
+    final invalid = status == 'invalid';
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: isOwn
+          ? CrossAxisAlignment.end
+          : CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 6, right: 6, bottom: 3),
+          child: Builder(
+            builder: (context) => Text(
+              invalid
+                  ? '⚠️ ${'chat_view.unverified_sender'.tr()}'
+                  : 'ⓘ ${'chat_view.unsigned_sender'.tr()}',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: invalid
+                    ? Theme.of(context).colorScheme.error
+                    : Theme.of(context).colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+        Flexible(child: child),
+      ],
+    );
+  }
+}

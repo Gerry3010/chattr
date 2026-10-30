@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chattr - Technik: alle Ablaufdiagramme</title>
+    <meta name="description" content="Alle Chattr-Abläufe als Diagramm: Konto, Chats, Nachrichten, Medien, Gruppen, Push, Aktionen und Blockieren.">
+    <link rel="icon" type="image/svg+xml" href="assets/icons/logo-nobg.svg">
+    <link rel="icon" type="image/png" href="assets/icons/logo-nobg.png">
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+    <!-- Theme Toggle -->
+    <button class="theme-toggle" id="themeToggle" aria-label="Toggle dark mode">
+        <span class="icon-sun">☀️</span>
+        <span class="icon-moon">🌙</span>
+    </button>
+
+    <section class="flow flow-page">
+        <div class="flow-container">
+            <p class="flow-back"><a href="index.html">←&nbsp;Zurück zu Chattr</a></p>
+            <h2>Technik: alle Ablaufdiagramme</h2>
+            <p class="flow-intro">
+                Jeder Ablauf in Chattr als Diagramm. Drei Grundsätze ziehen
+                sich durch: Der Server sieht nie Klartext, weil jede Nachricht
+                auf dem Gerät für jeden Empfänger einzeln verschlüsselt wird.
+                Der Server vergisst, denn das Chiffrat wird nach der Zustellung
+                gelöscht. Und was die Sicherheit betrifft (Selbstzerstörung,
+                Sperren, Beitritts-Freigaben), setzt die Datenbank durch und
+                nicht bloß die App.
+            </p>
+            <div id="flowExpanded"></div>
+            <p class="flow-all-link">
+                <a href="index.html">←&nbsp;Zurück zu Chattr</a>
+            </p>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <p>&copy; 2025 – 2026 <a href="https://geraldhofbauer.net">Gerald Hofbauer</a> v1.2.0</p>
+    </footer>
+
+    <script src="assets/js/theme.js"></script>
+    <script src="assets/js/mermaid.min.js"></script>
+    <script src="assets/js/flow-sources.js"></script>
+    <script src="assets/js/flow-diagram.js"></script>
+</body>
+</html>

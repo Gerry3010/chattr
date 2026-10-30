@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net> -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!--
+  Android 12 replaced the windowBackground trick with a system splash screen and
+  IGNORES @drawable/launch_background. Without this file the launch screen would
+  stay at the platform default on every current device — which is most of them,
+  including the Galaxy. The system draws the app icon itself; we only get to say
+  what it sits on. Colour follows the light/dark resource as everywhere else.
+-->
+<resources>
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">?android:colorBackground</item>
+    </style>
+</resources>

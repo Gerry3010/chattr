@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Chattr</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>chattr</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(FLUTTER_BUILD_NAME)</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>net.geraldhofbauer.chattr.sharemedia</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ShareMedia-net.geraldhofbauer.chattr</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>FirebaseAppDelegateProxyEnabled</key>
+	<false/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<!-- Which URL schemes the app may ASK about. Only what we actually open:
+	     `maps` (Apple Maps, first choice on iOS) and `geo` (the neutral form,
+	     tried second — a third-party map app may claim it). Deliberately NOT
+	     `comgooglemaps`: we never launch it, and every scheme listed here is an
+	     app-detection capability. Declaring one you don't call hands that
+	     ability out for nothing. See LocationEnvelope.openUris. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>maps</string>
+		<string>geo</string>
+	</array>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Chattr uses the camera to scan contact QR codes and to capture photos and videos for your chats.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Chattr uses Face ID to unlock the app and protect your encrypted messages.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Chattr uses the microphone for calls and to record voice messages and video.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Chattr saves photos and videos you receive to your photo library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Chattr needs access to your photo library so you can attach images and videos to your chats.</string>
+	<!-- QuickShare: declares the app handles messaging intents so donated
+	     INSendMessageIntent interactions surface in the share-sheet suggestion
+	     row + Siri. Donation happens in ShareSuggestionsChannel. -->
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>INSendMessageIntent</string>
+	</array>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>remote-notification</string>
+		<string>voip</string>
+	</array>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

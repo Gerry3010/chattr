@@ -1,0 +1,1131 @@
+image: ghcr.io/cirruslabs/flutter:3.44.0
+
+definitions:
+  caches:
+    flutter-pub: ~/.pub-cache
+    flutter-build: .dart_tool
+    # APK build toolchains (self-hosted runner keeps these on the host across
+    # runs → only the first APK build pays the install cost).
+    cargo: ~/.cargo
+    rustup: ~/.rustup
+    gomod: ~/go/pkg/mod
+    android-sdk: ~/.android-sdk-extra
+  steps:
+    # Static analysis + unit tests. Integration tests (live Supabase / native
+    # crypto) self-skip when those aren't present, so this runs anywhere.
+    - step: &analyze-and-test
+        name: Analyze & Test
+        # Runs on the self-hosted Netcup runners (workspace-wide) instead of BB
+        # Cloud.
+        runs-on:
+          - self.hosted
+          - linux
+        caches:
+          - flutter-pub
+          - flutter-build
+        script:
+          # One bundled block whose output is mirrored to pipe.log, so the
+          # after-script can attach the last lines to the pipepush notification
+          # on failure. set -eo pipefail preserves the fail-fast and exit-code
+          # semantics of the earlier item list (tee would otherwise swallow the
+          # code).
+          - |
+            set -eo pipefail
+            {
+              flutter --version
+              # webcrypto 0.6.1 builds its native assets via a build hook that
+              # needs cmake (+ ninja) on the host — not in the flutter image.
+              apt-get update && apt-get install -y cmake ninja-build
+              # pubspec declares .env as an asset; create a placeholder so
+              # `flutter analyze` doesn't fail with asset_does_not_exist (the real
+              # .env is written from secrets in the Build step). Unit tests don't
+              # read it.
+              printf 'SUPABASE_URL=placeholder\nSUPABASE_ANON_KEY=placeholder\n' > .env
+              bash scripts/ci/pub-get.sh
+              # Two guards against silent divergence — both cheap, both at the
+              # point where it still costs nobody any effort: (1) does every
+              # fork ref still point at the commit from the lock? (2) does
+              # backend_version cover the migrations present?
+              bash scripts/ci/assert-fork-refs-pinned.sh
+              bash scripts/ci/assert-backend-version-covers-migrations.sh
+              flutter analyze
+              flutter test --exclude-tags integration
+            } 2>&1 | tee "${BITBUCKET_CLONE_DIR:-.}/pipe.log"
+
+        after-script:
+          # pipepush: report on failure only (success is reported by the deploy
+          # step). The helper attaches the build-log link + (on failure) the
+          # step-log tail.
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" failure-only
+
+    # ── Security scans ──────────────────────────────────────────────────────
+    # SAST on every push (fast, non-blocking, runs parallel to analyze-and-test
+    # so it never gates the deploy). --config=auto pulls community rulesets
+    # (Dart + Go) from the registry anonymously; no SEMGREP_APP_TOKEN needed.
+    - step: &security-fast
+        name: "Security – SAST (Semgrep)"
+        # Runs on the self-hosted Netcup runners instead of BB Cloud.
+        runs-on:
+          - self.hosted
+          - linux
+        # pip-installed semgrep in a plain python image, NOT the official
+        # returntocorp/semgrep image — the latter's docker-entrypoint expects the
+        # code mounted at /src and aborts in Bitbucket (code lives in the clone
+        # dir). pip install avoids that detection entirely. One scan, both
+        # machine-readable artifacts (--*-output combine), text summary to log.
+        image: python:3.12-slim
+        script:
+          # Blocking, unlike Semgrep below (CHAT-43): a new SECURITY DEFINER
+          # without search_path or REVOKE FROM PUBLIC, or a table without RLS,
+          # fails the push. Python is already in this image.
+          - python3 scripts/ci/assert-migration-hygiene.py
+          - pip install --quiet semgrep
+          - semgrep scan --config=auto --json-output=semgrep-results.json --sarif-output=semgrep-results.sarif || true
+        artifacts:
+          - semgrep-results.json
+          - semgrep-results.sarif
+
+    # Dependency & container CVE scan — Trivy fs scans pubspec.lock AND
+    # native/chattr_crypto/go.sum in one pass. Never fails the pipeline.
+    - step: &trivy-scan
+        name: "Security – Deps & Container (Trivy)"
+        image: aquasec/trivy:latest
+        script:
+          - trivy fs --severity HIGH,CRITICAL --format json --output trivy-fs-results.json --exit-code 0 .
+          - trivy fs --severity HIGH,CRITICAL --exit-code 0 .
+        artifacts:
+          - trivy-fs-results.json
+
+    # Go CVEs for the native crypto core (ML-KEM-768 via cloudflare/circl).
+    # Image matches go.mod's `go 1.26`.
+    - step: &govulncheck-scan
+        name: "Security – Go CVEs (govulncheck)"
+        image: golang:1.26
+        script:
+          - go install golang.org/x/vuln/cmd/govulncheck@latest
+          - export PATH="$PATH:$(go env GOPATH)/bin"
+          - (cd native/chattr_crypto && govulncheck ./...) | tee govulncheck-results.txt || true
+        artifacts:
+          - govulncheck-results.txt
+
+    # DAST — OWASP ZAP baseline (passive). Runs ONLY against $STAGING_URL and
+    # self-skips if that repo var is unset, so it can NEVER hit prod. Wired up
+    # in Phase B once the persistent staging stack exists.
+    - step: &zap-baseline
+        name: "Security – DAST (OWASP ZAP Baseline)"
+        image: ghcr.io/zaproxy/zaproxy:stable
+        script:
+          - |
+            if [ -z "${STAGING_URL:-}" ]; then
+              echo "STAGING_URL nicht gesetzt — ZAP übersprungen (nie gegen Prod)."
+              exit 0
+            fi
+          # ZAP writes file reports to /zap/wrk; it aborts with "not mounted" if
+          # that dir doesn't exist (Bitbucket can't mount volumes), so create it.
+          - mkdir -p /zap/wrk
+          - zap-baseline.py -t "$STAGING_URL" -r zap-report.html -J zap-report.json -I || true
+          - for f in zap-report.html zap-report.json; do [ -f "/zap/wrk/$f" ] && cp "/zap/wrk/$f" . || true; done
+        artifacts:
+          - zap-report.html
+          - zap-report.json
+
+    # One pipepush notification summarizing all findings (weekly only).
+    # Reuses the existing PIPEPUSH_TOKEN but posts under pipeline "security-scan"
+    # → its own clearly-named notification stream in the chattr project.
+    - step: &pipepush-notify
+        name: "Security – Pipepush-Benachrichtigung"
+        image: python:3.12-slim
+        script:
+          - pip install --quiet requests
+          - python scripts/notify_via_pipepush.py
+
+    # ── Staging deploy (custom pipeline, manual/scheduled) ──────────────────
+    # Builds the web app against the STAGING Supabase and ships it to the
+    # persistent staging stack on the VPS (own isolated Supabase, see
+    # docs/STAGING_SETUP.md). Replaces the one-off manual seed. The staging
+    # ZAP/DAST target (STAGING_URL) is kept current by this.
+    - step: &build-staging
+        name: "Build Web (Staging)"
+        # Self-hosted since 2026-10-30: the workspace's cloud build minutes ran
+        # out (steps halted with allowance_exceeded; staging had not deployed
+        # since 2026-10-04). This step needs no BB-managed SSH key.
+        runs-on:
+          - self.hosted
+          - linux
+        # 8 GB for `dart compile js`, see build-web.
+        size: 2x
+        image: ghcr.io/cirruslabs/flutter:3.44.0
+        caches:
+          - flutter-pub
+          - flutter-build
+        script:
+          - apt-get update && apt-get install -y cmake ninja-build
+          # Git-Protokoll + Cache-Entscheidung + pub get an EINER Stelle.
+          - bash scripts/ci/pub-get.sh
+          - echo "SUPABASE_URL=${{STAGING_SUPABASE_URL}}" > .env
+          - echo "SUPABASE_ANDROID_URL=${{STAGING_SUPABASE_URL}}" >> .env
+          - echo "SUPABASE_ANON_KEY=${{STAGING_SUPABASE_ANON_KEY}}" >> .env
+          - flutter build web --release
+        artifacts:
+          - build/web/**
+
+    - step: &deploy-staging
+        name: "Deploy to Staging"
+        deployment: staging
+        # Self-hosted since 2026-10-30 (cloud minutes ran out, see build-staging),
+        # so it brings its own key like deploy-vps: the BB-managed one is not
+        # injected on a runner.
+        runs-on:
+          - self.hosted
+          - linux
+        image: atlassian/default-image:3
+        # Staging lives on the IONOS box (its own STAGING_SERVER_ADDR var), NOT the
+        # repo-wide SERVER_ADDR which now points at the netcup prod box after the
+        # Wien migration. Prod deploy below keeps using SERVER_ADDR (netcup).
+        script:
+          - apt-get update && apt-get install -y rsync openssh-client
+          - |
+            install -m 700 -d "$HOME/.ssh"
+            printf '%s' "$DEPLOY_SSH_KEY" | base64 -d > "$HOME/.ssh/chattr_deploy"
+            chmod 600 "$HOME/.ssh/chattr_deploy"
+            # Public fingerprint only: tells which key staging has to accept
+            # when the first connection is refused.
+            ssh-keygen -y -f "$HOME/.ssh/chattr_deploy" | ssh-keygen -lf -
+          - export SSHOPTS="-i $HOME/.ssh/chattr_deploy -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          # Web app → staging web root. --chmod=go-w: see the prod deploy (CHAT-25).
+          - rsync -az --chmod=go-w --delete -e "ssh $SSHOPTS" build/web/ chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/web/
+          # Admin console (static) → staging admin root (served by the IONOS nginx
+          # vhost staging-admin.chattr.geraldhofbauer.net behind basic_auth).
+          - rsync -az --chmod=go-w --delete -e "ssh $SSHOPTS" landing/admin/ chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/admin/
+          # Supabase stack → staging, PRESERVING the staging-only files: the
+          # generated .env (own keys), the isolated compose, the migration
+          # history (tracks what's applied to staging), and the data volumes.
+          - rsync -az --chmod=go-w -e "ssh $SSHOPTS" --exclude='.env' --exclude='docker-compose.staging.yml' --exclude='docker-compose.override.yml' --exclude='.migration_history' --exclude='volumes/db/data' --exclude='volumes/storage' supabase/ chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/supabase/
+          # admin-stats gate secret → staging (file passthrough; heredoc below is
+          # single-quoted). No-op if unset.
+          - |
+            if [ -n "${ADMIN_STATS_SECRET:-}" ]; then
+              printf '%s' "$ADMIN_STATS_SECRET" > admin_stats_secret
+              rsync -az --chmod=F600 -e "ssh $SSHOPTS" admin_stats_secret chattr@${{STAGING_SERVER_ADDR}}:/home/chattr/staging/supabase/.admin_stats_secret
+              rm -f admin_stats_secret
+            fi
+          - |
+            ssh $SSHOPTS chattr@${{STAGING_SERVER_ADDR}} << 'EOF'
+              set -e
+              cd ~/staging/supabase
+              # Inject the admin-stats gate secret into the staging .env (idempotent).
+              if [ -s .admin_stats_secret ] && [ -f .env ]; then
+                { grep -v '^ADMIN_STATS_SECRET=' .env 2>/dev/null || true; printf "ADMIN_STATS_SECRET='%s'\n" "$(cat .admin_stats_secret)"; } > .env.new && mv .env.new .env
+              fi
+              rm -f .admin_stats_secret
+              export COMPOSE_PROJECT_NAME=chattr_staging
+              # Rebuild the isolated compose from the (possibly updated) prod one:
+              # prefix container names + rebind published ports to a 127.0.0.1
+              # staging range so it never collides with prod on the same engine.
+              sed -E \
+                -e 's|^(    container_name: )([^[:space:]]+)|\1staging-\2|' \
+                -e 's|^(      - )"127\.0\.0\.1:\$\{KONG_HTTP_PORT\}:8000/tcp"|\1"127.0.0.1:8110:8000/tcp"|' \
+                -e 's|^(      - )"127\.0\.0\.1:\$\{KONG_HTTPS_PORT\}:8443/tcp"|\1"127.0.0.1:8153:8443/tcp"|' \
+                -e 's|^(      - )"127\.0\.0\.1:\$\{POSTGRES_PORT\}:5432"|\1"127.0.0.1:5532:5432"|' \
+                -e 's|^(      - )"127\.0\.0\.1:\$\{POOLER_PROXY_PORT_TRANSACTION\}:6543"|\1"127.0.0.1:6643:6543"|' \
+                -e 's|^(      - )"127\.0\.0\.1:4000:4000"|\1"127.0.0.1:4110:4000"|' \
+                -e 's|^(      - )"127.0.0.1:\$\{ADMIN_PANEL_PORT:-8899\}:80"|\1"127.0.0.1:8199:80"|' \
+                -e 's|\$\{ADMIN_PANEL_ROOT:-\.\./landing/admin\}|../admin|' \
+                docker-compose.yml > docker-compose.staging.yml
+              # Kong addresses realtime by the ORIGINAL container name —
+              # realtime parses the tenant out of the host's subdomain (see the
+              # comment at the realtime service in the compose file). The
+              # staging prefix above therefore breaks DNS resolution: Kong
+              # answers 503 (name unresolvable); bending kong.yml to the
+              # prefixed name would give 403 instead (tenant "staging-realtime-
+              # dev" does not exist). A network alias with the original name
+              # solves both — found 2026-08-05, before which staging realtime
+              # was simply dead (that also explained the hanging staging web
+              # splash).
+              sed -i '/container_name: staging-realtime-dev.supabase-realtime/a\    networks:\n      default:\n        aliases:\n          - realtime-dev.supabase-realtime' docker-compose.staging.yml
+              # Edge functions into the runtime dir (non-destructive; skip tests).
+              if [ -d functions ]; then mkdir -p volumes/functions && rsync -a --exclude='tests' functions/ volumes/functions/; fi
+              # ─── Backup before the deploy (the same mechanics as on prod) ──
+              #
+              # It stands here NOT because staging data would be valuable but
+              # because the prod version would otherwise run for the first time
+              # during the first prod deploy. Gerry, 2026-08-31: "please test on
+              # staging first before we fire anything at prod." A backup step
+              # that breathes for the first time, untested, inside a prod deploy
+              # is itself a risk — it can abort the deploy without anyone
+              # knowing whether the abort was justified.
+              #
+              # `-f docker-compose.staging.yml` is mandatory (otherwise the
+              # deploy grabs the wrong containers).
+              #
+              # The minimum size is smaller here than on prod: staging carries
+              # test data only. It still checks the same thing — "more than an
+              # aborted beginning". The database MUST be running for anything to
+              # be backed up — and on staging it normally is NOT: the stack is
+              # run on demand, and this very deploy is what starts it (auto-stop
+              # after 30 min). Skipping it would be the wrong repair: the data
+              # lies in the volume, and the migration further down touches it
+              # whether or not the container was running when this script
+              # started. So bring it up first, then back it up.
+              #
+              # `< /dev/null` on EVERY one of these calls is mandatory, not
+              # caution: `docker compose exec` attaches to stdin, and stdin
+              # inside `ssh host << 'EOF'` is the heredoc ITSELF. Without it the
+              # first successful call eats the entire rest of the deploy script
+              # as input — backup, `pull`, `up -d` and the migrations then do
+              # not happen, and the step still reports success. Exactly what
+              # happened on the first staging run on 2026-08-31; `migrate` has
+              # carried the same redirect forever for the same reason. It is
+              # touched ONLY when it is not ready anyway: on prod it is running,
+              # and then nothing should happen before the backup — what is
+              # backed up is the running system, as it is.
+              if ! docker compose -f docker-compose.staging.yml exec -T db pg_isready -U postgres >/dev/null 2>&1 < /dev/null; then
+                docker compose -f docker-compose.staging.yml up -d db < /dev/null
+                for _ in $(seq 1 30); do
+                  docker compose -f docker-compose.staging.yml exec -T db pg_isready -U postgres >/dev/null 2>&1 < /dev/null && break
+                  sleep 2
+                done
+              fi
+              if ! docker compose -f docker-compose.staging.yml exec -T db pg_isready -U postgres >/dev/null 2>&1 < /dev/null; then
+                echo "Datenbank wurde nicht bereit — ohne Sicherung wird nicht deployt. Abgebrochen." >&2
+                exit 1
+              fi
+              BACKUP_DIR="$HOME/backups-staging"
+              install -d -m 0700 "$BACKUP_DIR"
+              DUMP="$BACKUP_DIR/staging-db-$(date +%Y%m%d-%H%M%S)-pre-deploy.sql.gz"
+              ( umask 077; docker compose -f docker-compose.staging.yml exec -T db pg_dumpall -U postgres < /dev/null | gzip > "$DUMP" )
+              if ! gzip -t "$DUMP" 2>/dev/null; then
+                echo "Staging-Backup ist kein heiles Archiv — Deploy abgebrochen." >&2
+                rm -f "$DUMP"
+                exit 1
+              fi
+              DUMP_BYTES=$(wc -c < "$DUMP")
+              if [ "$DUMP_BYTES" -lt 10000 ]; then
+                echo "Staging-Backup ist nur $DUMP_BYTES Bytes gross — kein vollstaendiger Dump. Deploy abgebrochen." >&2
+                rm -f "$DUMP"
+                exit 1
+              fi
+              echo "✓ Staging-Sicherung: $DUMP ($(du -h "$DUMP" | cut -f1))"
+              ls -1t "$BACKUP_DIR"/staging-db-*.sql.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
+              # ───────────────────────────────────────────────────────────────
+              docker compose -f docker-compose.staging.yml pull
+              docker compose -f docker-compose.staging.yml up -d
+              # kong.yml is bind-mounted and rendered by the kong entrypoint at
+              # START, so `up -d` never notices a changed file and the new routes
+              # would not load (CHAT-44). Restart kong only when the file changed.
+              KONG_SHA=$(sha256sum volumes/api/kong.yml | cut -d' ' -f1)
+              if [ "$KONG_SHA" != "$(cat .kong.sha 2>/dev/null)" ]; then
+                docker compose -f docker-compose.staging.yml restart kong < /dev/null && echo "$KONG_SHA" > .kong.sha && echo "kong restarted (kong.yml changed)"
+              fi
+              # imgproxy sits behind a profile since CHAT-50; remove a container
+              # still running from before (no-op afterwards).
+              docker compose -f docker-compose.staging.yml rm -s -f imgproxy analytics vector < /dev/null 2>/dev/null || true
+              # `< /dev/null` is MANDATORY: `docker compose run` attaches to
+              # stdin by default — and stdin here is the SSH heredoc. Without
+              # the redirect the migrate container eats the rest of the script,
+              # and everything after it disappears silently (see the deploy-to-
+              # VPS step).
+              docker compose -f docker-compose.staging.yml run --rm -T migrate < /dev/null
+              # Restart functions + admin-proxy so a rotated ADMIN_STATS_SECRET is re-read.
+              docker compose -f docker-compose.staging.yml restart functions admin-proxy 2>/dev/null || true
+            EOF
+        after-script:
+          # pipepush: report success OR failure, with build-log link + error
+          # tail.
+          - bash scripts/pipepush_notify.sh deploy-staging always
+
+    - step: &build-web
+        name: Build Flutter Web
+        # Self-hosted since 2026-08-04: on BB Cloud this step stood for an hour
+        # without a single new log line (~10 minutes is normal), while our own
+        # runner sat beside it at load 0.00 — run #583 had to be stopped by
+        # hand. The move is permitted because the web build hangs on NO BB-
+        # managed SSH key (that is the only exception that has to stay on Cloud)
+        # and needs no Rust toolchain either — super_clipboard's cargokit path
+        # is built only natively, not for web.
+        runs-on:
+          - self.hosted
+          - linux
+        # 8 GB. Without `size` a step gets 4 GB, and with that the OOM killer
+        # shot down `dart compile js` in run #586 (exit -9). On BB Cloud it
+        # mostly still just squeezed through with the same 4 GB; here the step
+        # shares the machine with the APK build running in parallel, and "just"
+        # is then no longer enough.
+        #
+        # MIND the overcommit: together with the APK build's 2x that is 16 GB of
+        # reservation on a 15 GB box. It works out because both stay well below
+        # in reality (the APK build has been reined in since the caps of
+        # 2026-08-04: Kotlin daemon -Xmx1g, ActiveProcessorCount=4,
+        # CARGO_BUILD_JOBS=2). If something dies of OOM here again, the next
+        # step is NOT more memory but serialising the two builds again.
+        size: 2x
+        caches:
+          - flutter-pub
+          - flutter-build
+        script:
+          # Bundled + mirrored to pipe.log (see analyze-and-test), so the after-
+          # script can send the log tail along on a build failure. Scope of the
+          # release tag (scripts/ci/tag-scope.sh). The guard stands IN the same
+          # script block as the work: an `exit 0` in an entry of its own ends
+          # only that entry, not the step — the rest would run on, and the guard
+          # would be silent decoration.
+          - |
+            source scripts/ci/tag-scope.sh
+            scope_includes web || {
+              echo "Tag '$BITBUCKET_TAG' umfasst kein web — Schritt uebersprungen."
+              exit 0
+            }
+            set -eo pipefail
+            {
+              # Version aus version.json lesen
+              apt-get update && apt-get install -y jq
+              export APP_VERSION=$(jq -r '.app_version' version.json)
+              export BUILD_NUMBER=$(jq -r '.build_number' version.json)
+              echo "Building version $APP_VERSION+$BUILD_NUMBER"
+              bash scripts/ci/pub-get.sh
+              echo "SUPABASE_URL=${{SUPABASE_URL}}" > .env
+              echo "SUPABASE_ANON_KEY=${{SUPABASE_ANON_KEY}}" >> .env
+              flutter build web --release --build-name=$APP_VERSION --build-number=$BUILD_NUMBER
+            } 2>&1 | tee "${BITBUCKET_CLONE_DIR:-.}/pipe.log"
+        artifacts:
+          - build/web/**
+          - landing/**
+          - version.json
+
+        after-script:
+          # pipepush: report on failure only (success is reported by the deploy
+          # step).
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" failure-only
+
+
+    - step: &deploy-vps
+        name: Deploy to VPS
+        deployment: production
+        runs-on:
+          - self.hosted
+          - linux
+        image: atlassian/default-image:3
+        script:
+          # Read versions from version.json Only rsync is missing from the image
+          # — ssh, jq and curl are in it (checked 2026-08-05). And the step
+          # thereby hangs on a foreign package server: in run #582
+          # archive.ubuntu.com was unreachable and the whole deploy aborted
+          # because two files were to be copied. So: only the missing package,
+          # three attempts with a growing pause, and at the end a clear
+          # statement instead of a cryptic apt error in the middle of the
+          # deploy.
+          - |
+            if ! command -v rsync >/dev/null; then
+              for i in 1 2 3; do
+                apt-get update -qq && apt-get install -y --no-install-recommends rsync && break
+                echo "apt-Versuch $i fehlgeschlagen, neuer Versuch in $((i*10))s"
+                sleep $((i * 10))
+              done
+            fi
+            command -v rsync >/dev/null || {
+              echo "rsync ist nicht verfügbar — Paketquellen nicht erreichbar. Deploy abgebrochen, es wurde NICHTS verändert." >&2
+              exit 1
+            }
+          - export APP_VERSION=$(jq -r '.app_version' version.json)
+          - export BACKEND_VERSION=$(jq -r '.backend_version' version.json)
+          - export LANDING_VERSION=$(jq -r '.landing_version' version.json)
+          - echo "Deploying - App v$APP_VERSION | Backend v$BACKEND_VERSION | Landing v$LANDING_VERSION"
+          # Self-managed deploy key: the BB-managed SSH key isn't injected on
+          # self-hosted runners, so decode DEPLOY_SSH_KEY (secured repo var,
+          # base64) into a key file and use it explicitly for every ssh/rsync.
+          - |
+            install -m 700 -d "$HOME/.ssh"
+            printf '%s' "$DEPLOY_SSH_KEY" | base64 -d > "$HOME/.ssh/chattr_deploy"
+            chmod 600 "$HOME/.ssh/chattr_deploy"
+          - export SSHOPTS="-i $HOME/.ssh/chattr_deploy -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          # Web + landing — only when the tag covers them.
+          #
+          # **The check on index.html is not trimming.** The web sync runs with
+          # `--delete`: were it to run without a prior build, it would mirror an
+          # EMPTY directory and thereby delete the web app on the server. That
+          # could happen if somebody changes a tag's scope and skips the build
+          # step but not the deploy. Hence a second, independent brake here.
+          - |
+            source scripts/ci/tag-scope.sh
+            if scope_includes web; then
+              if [ ! -f build/web/index.html ]; then
+                echo "Kein Web-Build vorhanden (build/web/index.html fehlt), obwohl der Tag Web umfasst." >&2
+                echo "Abgebrochen, BEVOR rsync --delete das Web-Verzeichnis am Server leert." >&2
+                exit 1
+              fi
+              # --chmod=go-w: the build checkout carries 0666/0777, and -a copied that
+              # onto the server; 255 world-writable entries, the live edge functions
+              # among them (CHAT-25). Secrets travel as F600.
+              rsync -az --chmod=go-w --delete -e "ssh $SSHOPTS" build/web/ chattr@$SERVER_ADDR:/home/chattr/app/web/
+              rsync -az --chmod=go-w --delete -e "ssh $SSHOPTS" landing/ chattr@$SERVER_ADDR:/home/chattr/app/landing/
+              echo "✓ Web + Landing ausgeliefert"
+            else
+              echo "Tag '$BITBUCKET_TAG' umfasst kein Web — Web und Landing bleiben, wie sie sind."
+            fi
+          # Server: supabase/ (Migrationen + Edge Functions) und version.json.
+          - |
+            source scripts/ci/tag-scope.sh
+            if scope_includes server; then
+              rsync -az --chmod=go-w -e "ssh $SSHOPTS" supabase/ chattr@$SERVER_ADDR:/home/chattr/app/supabase/
+              rsync -az --chmod=go-w -e "ssh $SSHOPTS" version.json chattr@$SERVER_ADDR:/home/chattr/app/
+              echo "✓ supabase/ und version.json ausgeliefert"
+            else
+              echo "Tag '$BITBUCKET_TAG' umfasst keinen Server — supabase/ bleibt, wie es ist."
+            fi
+          # Push the FCM service-account secret (BB secured repo var) to the VPS
+          # as a file — never echoed to logs. Skipped cleanly if the var is unset.
+          - |
+            if [ -n "${FCM_SERVICE_ACCOUNT:-}" ]; then
+              printf '%s' "$FCM_SERVICE_ACCOUNT" > fcm_sa.json
+              rsync -az --chmod=F600 -e "ssh $SSHOPTS" fcm_sa.json chattr@$SERVER_ADDR:/home/chattr/app/supabase/.fcm_sa.json
+              rm -f fcm_sa.json
+            fi
+          # APNs token key for VoIP call pushes (00088) — the .p8 is multi-line,
+          # so it travels as a file like the FCM account. Key + ids together or
+          # not at all. No-op if unset.
+          - |
+            if [ -n "${APNS_KEY_P8:-}" ] && [ -n "${APNS_KEY_ID:-}" ] && [ -n "${APNS_TEAM_ID:-}" ]; then
+              printf '%s' "$APNS_KEY_P8" > apns_key.p8
+              printf '%s\n%s\n' "$APNS_KEY_ID" "$APNS_TEAM_ID" > apns_ids
+              rsync -az --chmod=F600 -e "ssh $SSHOPTS" apns_key.p8 chattr@$SERVER_ADDR:/home/chattr/app/supabase/.apns_key.p8
+              rsync -az --chmod=F600 -e "ssh $SSHOPTS" apns_ids chattr@$SERVER_ADDR:/home/chattr/app/supabase/.apns_ids
+              rm -f apns_key.p8 apns_ids
+            fi
+          # admin-stats gate secret (plain string) — same file-based passthrough
+          # as FCM because the heredoc below is single-quoted. No-op if unset.
+          - |
+            if [ -n "${ADMIN_STATS_SECRET:-}" ]; then
+              printf '%s' "$ADMIN_STATS_SECRET" > admin_stats_secret
+              rsync -az --chmod=F600 -e "ssh $SSHOPTS" admin_stats_secret chattr@$SERVER_ADDR:/home/chattr/app/supabase/.admin_stats_secret
+              rm -f admin_stats_secret
+            fi
+          # Restart Supabase and run migrations — server scope.
+          #
+          # **The guard stands IN THE SAME block as the work** — until
+          # 2026-08-31 it did not. An `exit 0` in a `- |` entry of its own ends
+          # only that entry; the following ones run on. The guard was thereby
+          # silent decoration: an `-apk` tag restarted Supabase and ran the
+          # migrations regardless. Exactly the trap `CLAUDE.md` warns about — it
+          # stood here in the code, while the other three steps (web, APK build,
+          # APK publish) get it right.
+          - |
+            source scripts/ci/tag-scope.sh
+            if ! scope_includes server; then
+              echo "Tag '$BITBUCKET_TAG' umfasst keinen Server — kein Backup, kein Neustart, keine Migrationen."
+              exit 0
+            fi
+            ssh $SSHOPTS chattr@$SERVER_ADDR << 'EOF'
+              cd ~/app/supabase
+              # ─── Backup BEFORE anything can touch the data ─────────────────
+              #
+              # Before, the deploy backed up nothing at all: a migration doing
+              # the wrong thing was final. With an end-to-end app that weighs
+              # more than elsewhere — the server clears the ciphertext away as
+              # soon as the device has fetched it, so there is no second source
+              # anything could be reconstructed from.
+              #
+              # It stands BEFORE `docker compose pull`, not only before
+              # `migrate`: a new Postgres container is an intervention one wants
+              # to be able to take back too.
+              #
+              # If it fails, the deploy aborts. A backup whose failure stays
+              # without consequence is none — it would be merely a log entry
+              # somebody relies on later. The database MUST be running for
+              # anything to be backed up — and on staging it normally is NOT:
+              # the stack is run on demand, and this very deploy is what starts
+              # it (auto-stop after 30 min). Skipping it would be the wrong
+              # repair: the data lies in the volume, and the migration further
+              # down touches it whether or not the container was running when
+              # this script started. So bring it up first, then back it up.
+              #
+              # `< /dev/null` on EVERY one of these calls is mandatory, not
+              # caution: `docker compose exec` attaches to stdin, and stdin
+              # inside `ssh host << 'EOF'` is the heredoc ITSELF. Without it the
+              # first successful call eats the entire rest of the deploy script
+              # as input — backup, `pull`, `up -d` and the migrations then do
+              # not happen, and the step still reports success. Exactly what
+              # happened on the first staging run on 2026-08-31; `migrate` has
+              # carried the same redirect forever for the same reason. It is
+              # touched ONLY when it is not ready anyway: on prod it is running,
+              # and then nothing should happen before the backup — what is
+              # backed up is the running system, as it is.
+              if ! docker compose exec -T db pg_isready -U postgres >/dev/null 2>&1 < /dev/null; then
+                docker compose up -d db < /dev/null
+                for _ in $(seq 1 30); do
+                  docker compose exec -T db pg_isready -U postgres >/dev/null 2>&1 < /dev/null && break
+                  sleep 2
+                done
+              fi
+              if ! docker compose exec -T db pg_isready -U postgres >/dev/null 2>&1 < /dev/null; then
+                echo "Datenbank wurde nicht bereit — ohne Sicherung wird nicht deployt. Abgebrochen." >&2
+                exit 1
+              fi
+              BACKUP_DIR="$HOME/backups"
+              install -d -m 0700 "$BACKUP_DIR"
+              DUMP="$BACKUP_DIR/chattr-db-$(date +%Y%m%d-%H%M%S)-pre-deploy.sql.gz"
+              ( umask 077; docker compose exec -T db pg_dumpall -U postgres < /dev/null | gzip > "$DUMP" )
+              # **What is checked is the result, not the return value.** In a pipe the return
+              # value belongs to the last link — here gzip, and gzip is content even when
+              # pg_dumpall aborted after two lines. `set -o pipefail` would be the usual answer,
+              # but putting it at the top of this long, grown script would mean turning every
+              # hitherto inconsequential return value in it into an aborted prod deploy. So the
+              # two questions that really count:
+              #
+              #   1. Is the archive intact? (`gzip -t` reads it through once)
+              #   2. Is there anything in it at all? The prod DB is around 27 MB;
+              #      anything under 50 KB is an aborted dump, not a backup.
+              #
+              # If either fails, the deploy aborts. A backup whose failure stays without
+              # consequence is none — it would be merely a log entry somebody relies on
+              # later.
+              if ! gzip -t "$DUMP" 2>/dev/null; then
+                echo "Backup ist kein heiles Archiv — Deploy abgebrochen, es wurde NICHTS veraendert." >&2
+                rm -f "$DUMP"
+                exit 1
+              fi
+              DUMP_BYTES=$(wc -c < "$DUMP")
+              if [ "$DUMP_BYTES" -lt 50000 ]; then
+                echo "Backup ist nur $DUMP_BYTES Bytes gross — das ist kein vollstaendiger Dump. Deploy abgebrochen." >&2
+                rm -f "$DUMP"
+                exit 1
+              fi
+              echo "✓ Sicherung: $DUMP ($(du -h "$DUMP" | cut -f1))"
+              # Keep the last ten — otherwise the disk fills up and the next
+              # deploy fails on the backup instead of on itself.
+              ls -1t "$BACKUP_DIR"/chattr-db-*.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
+              # ───────────────────────────────────────────────────────────────
+              # Inject the FCM service account into .env (idempotent, single-quoted
+              # so compose's dotenv keeps the JSON's double-quotes). Only if .env
+              # already exists, so we never replace it with just this one line.
+              if [ -s .fcm_sa.json ] && [ -f .env ]; then
+                umask 077
+                { grep -v '^FCM_SERVICE_ACCOUNT=' .env 2>/dev/null || true; printf "FCM_SERVICE_ACCOUNT='%s'\n" "$(cat .fcm_sa.json)"; } > .env.new
+                mv .env.new .env
+              fi
+              rm -f .fcm_sa.json
+              # admin-stats gate secret → .env (idempotent; plain string, single
+              # quoted so any special chars survive compose's dotenv parsing).
+              if [ -s .admin_stats_secret ] && [ -f .env ]; then
+                umask 077
+                { grep -v '^ADMIN_STATS_SECRET=' .env 2>/dev/null || true; printf "ADMIN_STATS_SECRET='%s'\n" "$(cat .admin_stats_secret)"; } > .env.new
+                mv .env.new .env
+              fi
+              rm -f .admin_stats_secret
+              # APNs → .env (idempotent). The PEM keeps its line breaks as \n
+              # escapes inside single quotes; the function turns them back.
+              if [ -s .apns_key.p8 ] && [ -s .apns_ids ] && [ -f .env ]; then
+                umask 077
+                KEY_ID=$(sed -n 1p .apns_ids); TEAM_ID=$(sed -n 2p .apns_ids)
+                { grep -v -e '^APNS_KEY_P8=' -e '^APNS_KEY_ID=' -e '^APNS_TEAM_ID=' .env 2>/dev/null || true
+                  printf "APNS_KEY_P8='%s'\n" "$(awk '{printf "%s\\n", $0}' .apns_key.p8)"
+                  printf "APNS_KEY_ID='%s'\nAPNS_TEAM_ID='%s'\n" "$KEY_ID" "$TEAM_ID"; } > .env.new
+                mv .env.new .env
+              fi
+              rm -f .apns_key.p8 .apns_ids
+              # ADMIN_STATS_SECRET reaches the functions container via docker-compose.yml's
+              # own functions.environment (committed) + the .env line above — no override
+              # needed. FCM still uses the override below (it isn't in compose.yml).
+              # Pass the var into the functions container via a compose override —
+              # created only if a 'functions' service exists and nothing is clobbered.
+              if docker compose config --services 2>/dev/null | grep -qx functions && [ ! -e docker-compose.override.yml ]; then
+                printf 'services:\n  functions:\n    environment:\n      FCM_SERVICE_ACCOUNT: ${FCM_SERVICE_ACCOUNT}\n' > docker-compose.override.yml
+                echo "wrote docker-compose.override.yml (FCM passthrough)"
+              fi
+              # Edge functions: the runtime serves ./volumes/functions but the
+              # repo ships them in ./functions — sync so function updates deploy.
+              # Non-destructive (no --delete): never remove the runtime's own
+              # 'main' router or other server-managed files; skip the tests dir.
+              if [ -d functions ]; then
+                mkdir -p volumes/functions
+                rsync -a --exclude='tests' functions/ volumes/functions/ 2>/dev/null || cp -a functions/. volumes/functions/
+              fi
+              docker compose pull
+              docker compose up -d
+              # kong.yml is bind-mounted and rendered by the kong entrypoint at
+              # START, so `up -d` never notices a changed file and the new routes
+              # would not load (CHAT-44). Restart kong only when the file changed.
+              KONG_SHA=$(sha256sum volumes/api/kong.yml | cut -d' ' -f1)
+              if [ "$KONG_SHA" != "$(cat .kong.sha 2>/dev/null)" ]; then
+                docker compose restart kong < /dev/null && echo "$KONG_SHA" > .kong.sha && echo "kong restarted (kong.yml changed)"
+              fi
+              # imgproxy sits behind a profile since CHAT-50; remove a container
+              # still running from before (no-op afterwards).
+              docker compose rm -s -f imgproxy analytics vector < /dev/null 2>/dev/null || true
+              # --rm: without it a `supabase-migrate-run-*` container is left
+              # behind per deploy (40 of them accumulated as of 2026-08-03) —
+              # Docker then reports them as orphans on every `up`. The staging
+              # deploy has always done it right. `< /dev/null` is MANDATORY and
+              # was the reason NOTHING here has been running for ever: `docker
+              # compose run` attaches to stdin by default, and stdin with `ssh
+              # host << 'EOF'` is the heredoc itself. So the migrate container
+              # swallowed the entire rest of the deploy script as input — the
+              # functions restart, the vault seeding and the app_versions sync
+              # were never executed, without a single error message. Reproduced
+              # with `cat > /dev/null` in a test heredoc.
+              docker compose run --rm -T migrate < /dev/null
+              # app_versions is what clients read via get_backend_version(),
+              # and it had drifted to 1.3.0 / migration 00038 while the server
+              # was long past 00064 — because scripts/sync-backend-version.sh
+              # is manual and nobody remembered it. Today that is harmless
+              # (min_backend_version is 1.0.0), but the day a client ships a
+              # higher minimum it would declare a perfectly current server too
+              # old. Doing it HERE ties it to the one event that makes it true:
+              # the migrations having just been applied.
+              #
+              # The version is read from the version.json rsynced next to this
+              # directory, NOT from a CI variable — the surrounding heredoc is
+              # <<'EOF' (quoted), so nothing from the pipeline shell expands in
+              # here. Single psql -c rather than a heredoc for the same reason:
+              # a nested heredoc inside this one would need its terminator at
+              # column 0 and would break the indentation of the whole block.
+              BACKEND_VERSION=$(sed -n 's/.*"backend_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' ../version.json)
+              LATEST_MIGRATION=$(ls migrations | grep -E '^[0-9]{5}_' | sort | tail -1)
+              if [ -n "$BACKEND_VERSION" ]; then
+                docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=0 -q -c "INSERT INTO app_versions (component, version, description, deployed_by) SELECT c, '$BACKEND_VERSION', 'Synced by CI (migrations up to $LATEST_MIGRATION)', 'pipeline' FROM unnest(ARRAY['backend','database','migrations']) AS c ON CONFLICT (component, version) DO UPDATE SET deployed_at = NOW(), description = EXCLUDED.description;" \
+                  && echo "app_versions → backend v$BACKEND_VERSION ($LATEST_MIGRATION)" \
+                  || echo "app_versions sync failed (non-fatal)"
+              else
+                echo "app_versions sync skipped — no backend_version in ../version.json"
+              fi
+              # Reload the edge runtime so it serves the freshly synced code;
+              # admin-proxy too so a rotated ADMIN_STATS_SECRET is re-read.
+              docker compose restart functions admin-proxy 2>/dev/null || true
+              # Vault: notify triggers authenticate to the edge function via
+              # private.get_secret('service_role_key'); media-retention uses
+              # 'project_url'. Seed both from .env IF MISSING (idempotent no-op
+              # once set) so a fresh DB is reproducible without committing secrets.
+              SRK=$(grep -E '^SERVICE_ROLE_KEY=' .env 2>/dev/null | head -1 | cut -d= -f2-)
+              AEU=$(grep -E '^API_EXTERNAL_URL=' .env 2>/dev/null | head -1 | cut -d= -f2-)
+              if [ -n "$SRK" ]; then
+                docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=0 -v srk="$SRK" -c "SELECT vault.create_secret(:'srk','service_role_key') WHERE NOT EXISTS (SELECT 1 FROM vault.secrets WHERE name='service_role_key');" || true
+              fi
+              if [ -n "$AEU" ]; then
+                docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=0 -v aeu="$AEU" -c "SELECT vault.create_secret(:'aeu','project_url') WHERE NOT EXISTS (SELECT 1 FROM vault.secrets WHERE name='project_url');" || true
+              fi
+            EOF
+          # Log deployment success
+          - |
+            echo << 'EOF'
+            ✓ Deployment completed successfully
+              App: v$APP_VERSION
+              Backend: v$BACKEND_VERSION
+              Landing: v$LANDING_VERSION
+            EOF
+
+        after-script:
+          # pipepush: report success OR failure of the deploy, with log link +
+          # tail.
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" always
+
+    # Builds the Android APK (the only Android channel — no Play Store,
+    # Codemagic retired): installs Go + Rust (cargokit /
+    # super_native_extensions), uses the image's NDK, builds the arm64 split APK
+    # (versionCode = build_number + 2000) and **verifies** versionCode + upload-
+    # key certificate. A downgrade guard skips the step when version.json was
+    # not bumped (backend-/landing-only deploys), so a lower versionCode is
+    # never built.
+    #
+    # DOES NOT PUBLISH — *publish-apk does that after the deploy.
+    #
+    # Required secured repo vars: ANDROID_KEYSTORE_BASE64 (base64 of
+    # android/upload-keystore.jks), ANDROID_KEYSTORE_PASSWORD,
+    # ANDROID_KEY_PASSWORD, ANDROID_KEY_ALIAS(=upload). Reuses DEPLOY_SSH_KEY +
+    # SERVER_ADDR (same as the VPS deploy) and SUPABASE_URL/ANON_KEY.
+    - step: &build-apk
+        name: Build Android APK
+        # Self-hosted since 2026-08-04. This step used to be pinned to BB Cloud
+        # because the host had 7.8 GB across three runners and OOM-killed the
+        # Gradle build; it now has 15 GB and 8 cores, so the reservation fits.
+        # Allowed off BB Cloud in the first place because it decodes its OWN
+        # deploy key rather than relying on the BB-managed SSH key (which BB
+        # does not inject on self-hosted runners) — see the CI convention.
+        # Two runners pulling a heavy job at once still fits; three would not.
+        runs-on:
+          - self.hosted
+          - linux
+        size: 2x   # 8 GB reserved
+        image: ghcr.io/cirruslabs/flutter:3.44.0
+        caches:
+          - flutter-pub
+          - flutter-build
+          - gradle
+          - cargo
+          - rustup
+          - gomod
+        script:
+          # Scope of the release tag (scripts/ci/tag-scope.sh). The guard stands
+          # IN the same script block as the work: an `exit 0` in an entry of its
+          # own ends only that entry, not the step — the rest would run on, and
+          # the guard would be silent decoration.
+          - |
+            source scripts/ci/tag-scope.sh
+            scope_includes apk || {
+              echo "Tag '$BITBUCKET_TAG' umfasst kein apk — Schritt uebersprungen."
+              exit 0
+            }
+            set -eo pipefail
+            {
+              apt-get update && apt-get install -y jq cmake ninja-build rsync openssh-client curl
+              APP_VERSION=$(jq -r '.app_version' version.json)
+              BUILD_NUMBER=$(jq -r '.build_number' version.json)
+              # Shipped alongside the release so the CMS can keep the landing
+              # footer's "Client vX • Backend vY" line in step with CI instead
+              # of it being typed by hand (it had drifted 3 releases behind).
+              BACKEND_VERSION=$(jq -r '.backend_version' version.json)
+              EXPECTED_VC=$((BUILD_NUMBER + 2000))   # --split-per-abi arm64 offset
+              echo "APK target: $APP_VERSION+$BUILD_NUMBER  versionCode=$EXPECTED_VC"
+
+              # ── Downgrade guard: skip if the CMS already serves this build ──
+              SERVED_VC=$(curl -fsSL "https://chattr.at/api/updates/android/manifest.json?u=$(date +%s)" 2>/dev/null | jq -r '.version_code // 0' 2>/dev/null || echo 0)
+              echo "currently served versionCode=$SERVED_VC"
+              if [ "$EXPECTED_VC" -le "$SERVED_VC" ] && [ "${APK_FORCE_BUILD:-0}" != "1" ]; then
+                echo "No version bump (served $SERVED_VC ≥ $EXPECTED_VC) — skipping APK build/publish."
+                exit 0
+              fi
+              # APK_FORCE_BUILD=1 builds despite the guard — only via the custom
+              # pipeline `build-apk-dryrun`, which has NO publish step. That
+              # allows the build to be exercised on any branch without touching
+              # version.json. (Before, exactly that was impossible: without a
+              # bump the build did not run, with a bump `build-apk` would have
+              # published a version that does not exist.)
+              [ "${APK_FORCE_BUILD:-0}" = "1" ] && echo "APK_FORCE_BUILD=1 — Guard übergangen (Dry-Run, kein Publish-Step)"
+
+              # ── Toolchains — TRACED (set -x) for diagnosis. xtrace is turned
+              #    OFF again (set +x) before any secret handling below. ──
+              set -x
+              # Go
+              if ! command -v go >/dev/null 2>&1; then
+                curl -sSL https://go.dev/dl/go1.23.4.linux-amd64.tar.gz | tar -C "$HOME" -xz
+              fi
+              export PATH="$HOME/go/bin:$PATH"; go version
+              # Rust (cargokit / super_native_extensions). Source the env after
+              # install and pin a default toolchain — the runner image ships a
+              # stale ~/.rustup/settings.toml that broke `rustup target add`.
+              export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+              export PATH="$CARGO_HOME/bin:$PATH"
+              if ! command -v rustup >/dev/null 2>&1; then
+                curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+              fi
+              [ -f "$CARGO_HOME/env" ] && . "$CARGO_HOME/env"
+              rustup default stable
+              rustup target add aarch64-linux-android
+              rustc --version && cargo --version
+              # Android SDK — fail loudly if the image doesn't ship one.
+              : "${ANDROID_SDK_ROOT:=${ANDROID_HOME:-}}"
+              if [ -z "$ANDROID_SDK_ROOT" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; then
+                echo "ERROR: no Android SDK (ANDROID_SDK_ROOT='$ANDROID_SDK_ROOT') — this image lacks it."; exit 1
+              fi
+              export ANDROID_HOME="$ANDROID_SDK_ROOT"
+              export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+              # NDK (native/build.sh needs the clang cross-compiler; the linker
+              # flag it passes handles 16 KB alignment, so any NDK works).
+              export ANDROID_NDK_HOME="$(ls -d "$ANDROID_SDK_ROOT"/ndk/* "$ANDROID_SDK_ROOT"/ndk-bundle 2>/dev/null | sort -V | tail -1)"
+              if [ -z "$ANDROID_NDK_HOME" ]; then
+                echo "no NDK in image — installing ndk;27.0.12077973 via sdkmanager"
+                # `yes | …` gets SIGPIPE when sdkmanager exits; under pipefail that
+                # aborts the step even though the install succeeded. Drop pipefail
+                # for these two and rely on the post-check below.
+                set +o pipefail
+                yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null 2>&1 || true
+                yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --install "ndk;27.0.12077973"
+                set -o pipefail
+                export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+              fi
+              [ -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" ] || { echo "ERROR: NDK not usable at $ANDROID_NDK_HOME"; exit 1; }
+              echo "NDK: $ANDROID_NDK_HOME"
+
+              # ── Native crypto (.so, arm64, 16 KB aligned) ──
+              ./native/build.sh android
+
+              # ── Release signing (materialise the gitignored keystore) ──
+              set +x   # STOP tracing — no keystore/passwords in the log from here
+              : "${ANDROID_KEYSTORE_BASE64:?set ANDROID_KEYSTORE_BASE64 repo var}"
+              echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/upload-keystore.jks
+              printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=upload-keystore.jks\n' \
+                "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_PASSWORD" "${ANDROID_KEY_ALIAS:-upload}" \
+                > android/key.properties
+
+              # ── Deps + .env (bakes the prod Supabase, same as the web build) ──
+              bash scripts/ci/pub-get.sh
+              printf 'SUPABASE_URL=%s\nSUPABASE_ANDROID_URL=%s\nSUPABASE_ANON_KEY=%s\nAPP_DOWNLOAD_BASE=%s\n' \
+                "${{SUPABASE_URL}}" "${{SUPABASE_URL}}" "${{SUPABASE_ANON_KEY}}" "https://chattr.at/api/updates/android" > .env
+
+              # ── Bound Gradle memory to fit the 8 GB step alongside the Dart
+              #    AOT compile (gen_snapshot). R8/minify is OFF, so Gradle needs
+              #    little heap; a big -Xmx just starves gen_snapshot → OOM. Trim
+              #    to 3g for this ephemeral CI checkout + no daemon. ──
+              sed -i -E 's/-Xmx[0-9]+[GgMm]/-Xmx3g/; s/-XX:MaxMetaspaceSize=[0-9]+[GgMm]/-XX:MaxMetaspaceSize=768m/' android/gradle.properties
+              printf '\norg.gradle.daemon=false\norg.gradle.workers.max=2\norg.gradle.parallel=false\n' >> android/gradle.properties
+              export GRADLE_OPTS="-Dorg.gradle.daemon=false"
+              # ── Pinning parallelism down: `nproc` lies on self-hosted ── The
+              # step container is capped by cgroup here too, exactly as on BB
+              # Cloud: memory.max = 8 GiB, CpuQuota = 400000/100000 = 4 CPUs.
+              # BUT: a CPU quota only throttles throughput, it does not change
+              # what `nproc` reports — that would come from the cpuset, and that
+              # is empty. So the container sees all 8 cores of the host, while
+              # the same machine has only 4 on BB Cloud. Every tool that ties
+              # its parallelism to nproc (cargo, ninja, make, JVM thread pools)
+              # starts twice as many workers here in the same 8 GB box. Measured
+              # without these lines: the container sticks to its ceiling, Gradle
+              # daemon gone. On BB Cloud the values are harmless — there it is 4
+              # anyway.
+              printf 'kotlin.compiler.execution.strategy=in-process\nkotlin.daemon.jvmargs=-Xmx1g\n' >> android/gradle.properties
+              # ActiveProcessorCount pulls the JVM down to the quota (GC
+              # threads, ForkJoinPool) — otherwise it goes on computing with 8.
+              sed -i -E 's/(org\.gradle\.jvmargs=.*)/\1 -XX:ActiveProcessorCount=4/' android/gradle.properties
+              export CARGO_BUILD_JOBS=2 MAKEFLAGS=-j2 CMAKE_BUILD_PARALLEL_LEVEL=2
+
+              # ── Build (arm64 split → versionCode = build_number + 2000) ──
+              flutter build apk --release --split-per-abi --target-platform android-arm64 \
+                --build-name="$APP_VERSION" --build-number="$BUILD_NUMBER"
+              APK=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+              test -f "$APK"
+
+              # ── Verify: versionCode + it's the established upload key ──
+              AAPT2=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/aapt2 | sort -V | tail -1)
+              VC=$("$AAPT2" dump badging "$APK" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
+              echo "built versionCode=$VC (expected $EXPECTED_VC)"
+              [ "$VC" = "$EXPECTED_VC" ] || { echo "versionCode mismatch — refusing to publish"; exit 1; }
+              # Use apksigner (reads APK Signature Scheme v2/v3); keytool -jarfile
+              # only sees the legacy v1 JAR signature, which Flutter release APKs
+              # don't carry → it read empty and false-flagged a "debug key".
+              APKSIGNER=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+              FP=$("$APKSIGNER" verify --print-certs "$APK" 2>/dev/null | sed -n 's/.*SHA-256 digest: *//p' | head -1 | tr -d ': ' | tr 'A-F' 'a-f')
+              echo "signing cert sha256=$FP"
+              case "$FP" in
+                7f28*146b) echo "cert OK (upload key)";;
+                *) echo "UNEXPECTED signing cert '$FP' — refusing to publish (debug key / wrong keystore?)"; exit 1;;
+              esac
+
+              # The verified APK goes to the publish step as an artefact. The
+              # CMS ingest deliberately does NOT happen here: it has to run
+              # AFTER the deploy, so that an APK is never downloadable before
+              # the migration that expects it exists.
+              cp "$APK" chattr.apk
+              echo "✓ APK gebaut + verifiziert (versionCode $EXPECTED_VC) — Veröffentlichung folgt nach dem Deploy"
+            } 2>&1 | tee "${BITBUCKET_CLONE_DIR:-.}/pipe.log"
+        artifacts:
+          - chattr.apk
+        after-script:
+          # Success is reported by the publish step — here only on failure.
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" failure-only
+
+    # Publishes the built APK in the CMS. Split out of the build step so the
+    # build can run IN PARALLEL with the web build, while publishing stays
+    # strictly AFTER `Deploy to VPS`.
+    #
+    # Both guards deliberately skip rather than fail: the worst outcome of a
+    # fault here has to be "nothing published", never "the wrong thing
+    # published". A tag has been the release trigger since 1.27 (Gerry,
+    # 2026-08-28). With that, `v1.27.0` is no longer just documentation but the
+    # act — and documentation that triggers nothing gets forgotten: v1.26.0, .1
+    # and .2 went out exactly that way, untagged.
+    #
+    # This step stands BEFORE everything else and is cheap: if the tag does not
+    # match `version.json`, the intent is unclear — and an unclear intent must
+    # not run a migration on prod. Better to fail here than with an APK that
+    # calls itself 1.27.0 and is 1.26.2.
+    - step: &assert-tag-matches-version
+        name: Tag == version.json
+        # Self-hosted since 2026-10-30: the workspace's cloud build minutes ran
+        # out (steps halted with allowance_exceeded; staging had not deployed
+        # since 2026-10-04). This step needs no BB-managed SSH key.
+        runs-on:
+          - self.hosted
+          - linux
+        image: atlassian/default-image:3
+        script:
+          - |
+            set -eo pipefail
+            source scripts/ci/tag-scope.sh
+            FELD=$(tag_version_field)
+            SOLL=$(jq -r ".$FELD" version.json)
+            IST=$(tag_version_part)
+            echo "Tag=$BITBUCKET_TAG  Umfang=$(tag_scope)  vergleicht gegen $FELD=$SOLL"
+            if [ "$IST" != "v$SOLL" ]; then
+              echo "FEHLER: Der Tag traegt die Version '$IST', version.json sagt '$FELD = $SOLL'."
+              echo "Erwartet wird 'v$SOLL' (plus ggf. das Suffix). Entweder den Tag korrigieren"
+              echo "oder die passende Version bumpen (scripts/bump-version.sh --component …)."
+              exit 1
+            fi
+            echo "✓ Tag und version.json stimmen ueberein"
+            for teil in web server apk; do
+              scope_includes "$teil" && echo "   → $teil wird ausgeliefert"
+            done
+            true
+
+    - step: &publish-apk
+        name: Publish Android APK
+        # Self-hosted since 2026-10-30 (cloud minutes ran out). It talks to the
+        # CMS over HTTPS with an ingest token, no SSH key involved.
+        runs-on:
+          - self.hosted
+          - linux
+        image: atlassian/default-image:3
+        script:
+          # Scope of the release tag (scripts/ci/tag-scope.sh). The guard stands
+          # IN the same script block as the work: an `exit 0` in an entry of its
+          # own ends only that entry, not the step — the rest would run on, and
+          # the guard would be silent decoration.
+          - |
+            source scripts/ci/tag-scope.sh
+            scope_includes apk || {
+              echo "Tag '$BITBUCKET_TAG' umfasst kein apk — Schritt uebersprungen."
+              exit 0
+            }
+            set -eo pipefail
+            {
+              # No artefact = the build step bailed out at its downgrade guard
+              # (no version bump). Nothing to do, not an error.
+              if [ ! -f chattr.apk ]; then
+                echo "Kein APK-Artefakt — Build-Step hat übersprungen (kein Versions-Bump). Nichts zu veröffentlichen."
+                exit 0
+              fi
+              apt-get update && apt-get install -y jq curl
+              APP_VERSION=$(jq -r '.app_version' version.json)
+              BUILD_NUMBER=$(jq -r '.build_number' version.json)
+              BACKEND_VERSION=$(jq -r '.backend_version' version.json)
+              EXPECTED_VC=$((BUILD_NUMBER + 2000))   # --split-per-abi arm64 offset
+
+              # Check again what is actually being delivered. Protects a re-run
+              # of an old pipeline from pushing a stale artefact over a newer
+              # release.
+              SERVED_VC=$(curl -fsSL "https://chattr.at/api/updates/android/manifest.json?u=$(date +%s)" 2>/dev/null | jq -r '.version_code // 0' 2>/dev/null || echo 0)
+              echo "ausgeliefert=$SERVED_VC, Artefakt=$EXPECTED_VC"
+              if [ "$EXPECTED_VC" -le "$SERVED_VC" ]; then
+                echo "Ausgeliefert ist bereits $SERVED_VC ≥ $EXPECTED_VC — nichts zu veröffentlichen."
+                exit 0
+              fi
+
+              # ── Register the release in the CMS (chattr.at = host + registry)
+              # ── The CMS stores the APK as a Craft asset and serves the update
+              # manifest at /api/updates/android/manifest.json — no separate
+              # download host, no static manifest.json. `backend_version`
+              # travels along so the CMS keeps the landing footer current
+              # (UpdatesController::_syncFooterVersions).
+              SHA=$(sha256sum chattr.apk | cut -d' ' -f1)
+              HTTP=$(curl -sS -o ingest.out -w '%{http_code}' -X POST "https://chattr.at/api/releases" \
+                -H "X-Ingest-Token: $CMS_INGEST_TOKEN" \
+                -F apk=@chattr.apk \
+                -F "metadata={\"platform\":\"android\",\"app_version\":\"$APP_VERSION\",\"backend_version\":\"$BACKEND_VERSION\",\"build_number\":$BUILD_NUMBER,\"version_code\":$EXPECTED_VC,\"sha256\":\"$SHA\",\"changelog_url\":\"https://bitbucket.org/Gerry3010/chattr/src/main/CHANGELOG.md\",\"channel\":\"stable\"}")
+              echo "CMS ingest → HTTP $HTTP"; cat ingest.out; echo
+              [ "$HTTP" = "200" ] || { echo "CMS ingest failed"; exit 1; }
+              echo "✓ Registered release in CMS (versionCode $EXPECTED_VC)"
+            } 2>&1 | tee "${BITBUCKET_CLONE_DIR:-.}/pipe.log"
+        after-script:
+          - bash scripts/pipepush_notify.sh "$BITBUCKET_REPO_SLUG" always
+
+pipelines:
+  # Every push on any branch (incl. pull requests) gets analyzed + tested.
+  # Semgrep SAST runs in parallel and is non-blocking (won't gate anything).
+  default:
+    - parallel:
+        - step: *analyze-and-test
+        - step: *security-fast
+
+  branches:
+    # main no longer builds and deploys (Gerry, 2026-08-28). A push here only
+    # checks. Delivery happens via a tag — see `tags:` below.
+    #
+    # Why: as long as every push to main went to prod, the moment of a release
+    # was a side effect of merging. Intermediate states somebody still wanted to
+    # check on a device could therefore not be brought to main at all — and the
+    # tags that were supposed to mark the release were simply forgotten for
+    # three releases (v1.26.0/.1/.2). Now the two coincide: the tag IS the
+    # release.
+    main:
+      - parallel:
+          - step: *analyze-and-test
+          - step: *security-fast
+      # Web and Android do not depend on each other and therefore ran in parallel from
+      # 2026-08-04. Reverted on 2026-08-05: the box does not carry it. Both steps reserve
+      # 8 GB, the machine has 15, and in runs #590 and #592 one of them died each time
+      # while the other ran — #591 in between, run alone, was green.
+      #
+      # The error did NOT look like a lack of memory but like
+      # `No space left on device` (`:jni:createFullJarRelease`,
+      # `:app:compileReleaseKotlin`) — although the host had 217 GB free and plenty of
+      # inodes. Under cgroup v2, tmpfs pages count against the container's memory limit;
+      # once it is reached, writes fail with ENOSPC instead of an OOM kill. The same
+      # cause also explains the broken Gradle cache before it: truncated jars come about
+      # exactly that way.
+      #
+      # Serialising costs wall-clock time, but a pipeline that falls over every second
+      # run costs more. Before parallelising again, the machine would have to grow, not
+      # the reservation shrink.
+      #
+      # Unchanged: *publish-apk runs only AFTER the deploy, so an APK is never
+      # downloadable before the migration that expects it exists.
+
+    # Auto-deploy every push to the persistent, ISOLATED staging stack (own
+    # Supabase + web root on the VPS under /home/chattr/staging — never touches
+    # prod at /home/chattr/app). Lets in-flight feature work be click-tested on
+    # staging before it reaches main/prod. build-staging builds web against the
+    # STAGING Supabase; deploy-staging ships it and runs migrations on the
+    # staging DB only. The same steps are also exposed as a manual/scheduled
+    # `custom: deploy-staging` (e.g. to push main's code to staging).
+    staging:
+      - step: *build-staging
+      - step: *deploy-staging
+
+  # Release. A tag `vX.Y.Z` on a commit builds, deploys and publishes — in
+  # exactly that order, and *publish-apk stays strictly behind *deploy-vps, so
+  # an APK is never downloadable before the migration that expects it exists.
+  #
+  # Analysis and tests run here AGAIN, although the commit on main was already
+  # green: a tag can sit on any commit, including one this combination has never
+  # seen. A release is rare enough to pay the few minutes.
+  tags:
+    'v*':
+      - step: *assert-tag-matches-version
+      - parallel:
+          - step: *analyze-and-test
+          - step: *security-fast
+      - step: *build-web
+      - step: *build-apk
+      - step: *deploy-vps
+      - step: *publish-apk
+
+  # Full weekly security sweep. Trigger via a Bitbucket schedule
+  # (Repo Settings → Pipelines → Schedules, or `bb schedule`): weekly, main.
+  # All four scans run in parallel; a single pipepush notification (pipeline
+  # "security-scan") summarizes the findings afterwards. govulncheck runs here
+  # (weekly) rather than per-push — its value is CVE currency, and the tiny
+  # native crypto module rarely changes between pushes.
+  custom:
+    weekly-full-security-scan:
+      - parallel:
+          - step: *security-fast
+          - step: *trivy-scan
+          - step: *govulncheck-scan
+          - step: *zap-baseline
+      - step: *pipepush-notify
+
+    # Update the persistent staging environment (build web against staging
+    # Supabase → ship to the VPS staging stack). Trigger: `bb run main
+    # --pattern deploy-staging`, or add a schedule. See docs/STAGING_SETUP.md.
+    deploy-staging:
+      - step: *build-staging
+      - step: *deploy-staging
+
+    # Builds the Android APK on demand AND publishes it — the same two steps as
+    # in the main deploy, only without the deploy in between. That is exactly
+    # why it should be used ONLY when the matching backend state is already out:
+    # otherwise an APK is downloadable before the migration that expects it
+    # exists. `bb run <branch> --pattern build-apk`.
+    build-apk:
+      - step: *build-apk
+      - step: *publish-apk
+
+    # The same, but build ONLY — no publish step, so it is structurally
+    # impossible for anything to be published here. `APK_FORCE_BUILD=1` bypasses
+    # the downgrade guard so the build runs through without a version bump; for
+    # iterating on the build itself (toolchains, runner, memory). bb run
+    # <branch> --pattern build-apk-dryrun --var APK_FORCE_BUILD=1 The --var is
+    # mandatory: `default:` below only pre-fills the web form, an API trigger
+    # otherwise does not send the variable at all.
+    build-apk-dryrun:
+      - variables:
+          - name: APK_FORCE_BUILD
+            default: "1"
+      - step: *build-apk

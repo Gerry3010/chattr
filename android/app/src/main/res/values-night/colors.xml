@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net> -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<resources>
+    <!-- Dark counterpart of the launch background. The white default was the
+         actual complaint: on a dark device the launch screen flashed white and
+         then dropped into a dark app. -->
+    <color name="splash_background">#1A1F2E</color>
+</resources>

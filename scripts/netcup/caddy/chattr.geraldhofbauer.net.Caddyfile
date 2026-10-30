@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Old landing host: everything redirects to chattr.at since 2026-10-11, EXCEPT
+# /download/*. Every app checks the maintenance flag there
+# (lib/core/init/maintenance_flag.dart bakes the address in), and APKs from
+# before 2026-07-28 ask for their update manifest there.
+# The host is proxied by Cloudflare (zone geraldhofbauer.net): after a change
+# `YES=1 cf purge geraldhofbauer.net`, or the old landing stays cached for hours.
+# Mirror of the live block in /etc/caddy/Caddyfile.
+chattr.geraldhofbauer.net {
+	# APK + Update-Manifest — von der CI nach /home/chattr/app/downloads
+	# publiziert (außerhalb des --delete-Landing-Syncs).
+	handle_path /download/* {
+		# Alte, eingebackene Updater-Adresse (APKs vor dem 28.07.2026).
+		# Ohne diese Zeile lesen sie hier ein eingefrorenes Manifest (1.9.2)
+		# und halten sich dauerhaft fuer aktuell.
+		redir /manifest.json https://chattr.at/api/updates/android/manifest.json 302
+		root * /home/chattr/app/downloads
+		@apk path *.apk
+		header @apk Content-Disposition attachment
+		# Der Wartungsschalter (lib/core/init/maintenance_flag.dart).
+		# no-cache ist hier kein Feinschliff: Eine gecachte Antwort
+		# "keine Wartung" waere genau dann falsch, wenn die Datei
+		# gerade gesetzt wurde.
+		header /maintenance.json {
+			Cache-Control "no-cache, must-revalidate"
+			Content-Type "application/json"
+		}
+		file_server
+	}
+	handle /technik.html {
+		redir https://chattr.at/technology/all 301
+	}
+	handle {
+		redir https://chattr.at/ 301
+	}
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+}

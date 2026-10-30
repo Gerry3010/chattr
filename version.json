@@ -1,0 +1,10 @@
+{
+  "app_version": "1.33.0",
+  "build_number": 108,
+  "backend_version": "1.9.0",
+  "backend_migration": "00095",
+  "min_backend_version": "1.0.0",
+  "min_client_version": "1.0.0",
+  "landing_version": "1.2.0",
+  "changelog_url": "https://bitbucket.org/Gerry3010/chattr/src/main/CHANGELOG.md"
+}

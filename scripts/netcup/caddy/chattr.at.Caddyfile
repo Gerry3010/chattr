@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Host Caddy site block for the chattr.at landing (Craft CMS) on nc-chattr.
+# Add to /etc/caddy/Caddyfile (or `import` it) → `sudo systemctl reload caddy`.
+#
+# TLS: chattr.at is PROXIED (orange cloud) in Cloudflare — for WAF geo-blocking
+# (RU/KP/CN/IR) + country analytics. Because CF intercepts :80/:443, Caddy can NOT
+# get a Let's Encrypt cert via HTTP-01/TLS-ALPN through the proxy → that yields a
+# 525 (SSL handshake failed). Fix = a Cloudflare Origin-CA certificate on the
+# origin + zone SSL/TLS mode "Full (strict)". The cert (15y, CF-trusted only) and
+# its key live in /etc/caddy/; generated + installed via ~/caddy-chattr-origin/
+# (key generated on the box, CSR signed in the CF dashboard — no DNS token on the
+# box). See memory `chattr-at-cloudflare-setup`.
+#
+# The CMS runs as an isolated Docker stack (~/chattr-cms) on 127.0.0.1:8109.
+# Content is CMS-managed; the landing is never indexed.
+#
+# ---------------------------------------------------------------------------
+# Geo gate: the website is offered in the EU only, minus France
+# ---------------------------------------------------------------------------
+# A deliberate limit on where the site is offered. France is out because
+# encryption services face additional national requirements there.
+#
+# Decided HERE and not in a Cloudflare WAF rule for two reasons: 451
+# "Unavailable For Legal Reasons" is the honest status code and Cloudflare's
+# block action can't send it, and a custom block page needs a paid plan while
+# this zone is Free.
+#
+# Country comes from `CF-IPCountry`, which Cloudflare adds to every proxied
+# request. A request that arrives WITHOUT the header did not come through
+# Cloudflare — someone hitting the origin IP directly — and falls through to
+# the 451 as well. Fail-closed is the right default for a gate whose whole
+# purpose is to not serve.
+#
+# ⚠ Machine paths stay open worldwide. This is not an oversight:
+#   /api/updates/*     the in-app Android updater polls this. Gating it would
+#                      strand every user outside the EU on an old build — worse
+#                      for them AND for security than showing them a website.
+#   /uploads/releases/ the APK that manifest points to. Same reason.
+#   /api/releases      the CI publishes releases here. Gating it would break
+#                      deploys from Bitbucket Cloud runners (US-hosted) — and
+#                      worse, the pipeline's downgrade guard reads the manifest
+#                      with `curl … || echo 0`, so a blocked request would look
+#                      exactly like "nothing published yet" and silently DISABLE
+#                      the guard that stops a versionCode downgrade.
+# `/download/latest` is NOT exempt — that one is a human download button.
+# ---------------------------------------------------------------------------
+
+chattr.at, www.chattr.at {
+	tls /etc/caddy/chattr.at.pem /etc/caddy/chattr.at.key
+	encode gzip
+	# HARD product rule: the landing is never indexed (also enforced by the
+	# noindex meta tag + CRAFT_DISALLOW_ROBOTS + /robots.txt).
+	header X-Robots-Tag "noindex, nofollow"
+
+	# Machine endpoints — reachable from anywhere, see the block comment above.
+	@machine path /api/* /uploads/releases/*
+	handle @machine {
+		reverse_proxy 127.0.0.1:8109
+	}
+
+	# EU member states except France (FR). Kept as one explicit list rather than
+	# a "not FR" rule so that adding or removing a country is a visible edit.
+	@eu_without_fr header_regexp CF-IPCountry ^(AT|BE|BG|HR|CY|CZ|DK|EE|FI|DE|GR|HU|IE|IT|LV|LT|LU|MT|NL|PL|PT|RO|SK|SI|ES|SE)$
+	handle @eu_without_fr {
+		reverse_proxy 127.0.0.1:8109
+	}
+
+	# Everyone else: the explanation page, uncacheable so no CDN or browser can
+	# hand it to someone in an allowed country (or vice versa).
+	handle {
+		header Cache-Control "private, no-store"
+		root * /etc/caddy/geoblock
+		rewrite * /451.html
+		file_server {
+			status 451
+		}
+	}
+}

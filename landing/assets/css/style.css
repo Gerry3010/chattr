@@ -1,0 +1,541 @@
+:root {
+    --primary-dark: #435E81;
+    --primary-light: #559CAD;
+    --accent: #E8836B;
+    --bg-primary: #FFFFFF;
+    --bg-secondary: #F5F7FA;
+    --bg-card: #FFFFFF;
+    --text-primary: #435E81;
+    --text-secondary: #6B7280;
+    --shadow-color: rgba(67, 94, 129, 0.1);
+    --hero-gradient: linear-gradient(135deg, var(--primary-light) 0%, var(--primary-dark) 100%);
+}
+
+[data-theme="dark"] {
+    --bg-primary: #1a1f2e;
+    --bg-secondary: #242b3d;
+    --bg-card: #2d3548;
+    --text-primary: #e2e8f0;
+    --text-secondary: #a0aec0;
+    --shadow-color: rgba(0, 0, 0, 0.3);
+    --hero-gradient: linear-gradient(135deg, #2d4a5e 0%, #1a2d3d 100%);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --bg-primary: #1a1f2e;
+        --bg-secondary: #242b3d;
+        --bg-card: #2d3548;
+        --text-primary: #e2e8f0;
+        --text-secondary: #a0aec0;
+        --shadow-color: rgba(0, 0, 0, 0.3);
+        --hero-gradient: linear-gradient(135deg, #2d4a5e 0%, #1a2d3d 100%);
+    }
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    line-height: 1.6;
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    transition: background 0.3s ease, color 0.3s ease;
+}
+
+/* Theme Toggle */
+.theme-toggle {
+    position: fixed;
+    top: 1.5rem;
+    right: 1.5rem;
+    z-index: 100;
+    background: var(--bg-card);
+    border: none;
+    border-radius: 50%;
+    width: 50px;
+    height: 50px;
+    cursor: pointer;
+    box-shadow: 0 4px 15px var(--shadow-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    transition: all 0.3s ease;
+}
+
+.theme-toggle:hover {
+    transform: scale(1.1);
+}
+
+.theme-toggle .icon-sun,
+.theme-toggle .icon-moon {
+    position: absolute;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.theme-toggle .icon-sun {
+    opacity: 0;
+    transform: rotate(-90deg);
+}
+
+.theme-toggle .icon-moon {
+    opacity: 1;
+    transform: rotate(0deg);
+}
+
+[data-theme="dark"] .theme-toggle .icon-sun {
+    opacity: 1;
+    transform: rotate(0deg);
+}
+
+[data-theme="dark"] .theme-toggle .icon-moon {
+    opacity: 0;
+    transform: rotate(90deg);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .theme-toggle .icon-sun {
+        opacity: 1;
+        transform: rotate(0deg);
+    }
+    :root:not([data-theme="light"]) .theme-toggle .icon-moon {
+        opacity: 0;
+        transform: rotate(90deg);
+    }
+}
+
+/* Hero Section */
+.hero {
+    min-height: 100vh;
+    background: var(--hero-gradient);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 2rem;
+    position: relative;
+    overflow: hidden;
+    transition: background 0.3s ease;
+}
+
+.hero::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    /* The SVGs render fine in WebKit since their broken drop-shadow filters
+       (no filterUnits → objectBoundingBox blow-up) were removed — no Safari
+       special-casing needed anymore. */
+    background: url('../icons/logo-background.png') center center no-repeat;
+    background: url('../icons/logo-background.svg') center center no-repeat;
+    background-size: cover;
+    opacity: 0.1;
+}
+
+.hero-content {
+    position: relative;
+    z-index: 1;
+    max-width: 700px;
+}
+
+.logo {
+    width: 180px;
+    height: 180px;
+    margin-bottom: 2rem;
+    filter: drop-shadow(0 10px 30px rgba(0, 0, 0, 0.2));
+}
+
+.hero h1 {
+    font-size: 3.5rem;
+    color: var(--white);
+    margin-bottom: 1rem;
+    font-weight: 700;
+}
+
+.hero p {
+    font-size: 1.4rem;
+    color: rgba(255, 255, 255, 0.9);
+    margin-bottom: 2.5rem;
+}
+
+.cta-button {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--white);
+    padding: 1rem 3rem;
+    font-size: 1.2rem;
+    font-weight: 600;
+    text-decoration: none;
+    border-radius: 50px;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 15px rgba(232, 131, 107, 0.4);
+}
+
+.cta-button:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(232, 131, 107, 0.5);
+    background: #d9705a;
+}
+
+/* Features Section */
+.features {
+    padding: 5rem 2rem;
+    background: var(--bg-secondary);
+    transition: background 0.3s ease;
+}
+
+.features-container {
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+.features h2 {
+    text-align: center;
+    font-size: 2.5rem;
+    color: var(--text-primary);
+    margin-bottom: 3rem;
+}
+
+.features-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 2rem;
+}
+
+.feature-card {
+    background: var(--bg-card);
+    padding: 2rem;
+    border-radius: 16px;
+    box-shadow: 0 4px 20px var(--shadow-color);
+    transition: transform 0.3s ease, background 0.3s ease;
+}
+
+.feature-card:hover {
+    transform: translateY(-5px);
+}
+
+.feature-icon {
+    font-size: 2.5rem;
+    margin-bottom: 1rem;
+}
+
+.feature-card h3 {
+    font-size: 1.3rem;
+    color: var(--text-primary);
+    margin-bottom: 0.75rem;
+}
+
+.feature-card p {
+    color: var(--text-secondary);
+    font-size: 1rem;
+}
+
+/* Pledge: never client-side scanning */
+.pledge {
+    padding: 4rem 2rem;
+    background: var(--bg-primary);
+    transition: background 0.3s ease;
+}
+
+.pledge-card {
+    max-width: 760px;
+    margin: 0 auto;
+    text-align: center;
+    background: var(--bg-card);
+    border: 2px solid var(--accent);
+    border-radius: 20px;
+    padding: 2.75rem 2rem;
+    box-shadow: 0 4px 24px var(--shadow-color);
+    transition: background 0.3s ease;
+}
+
+.pledge-icon {
+    margin-bottom: 0.75rem;
+    line-height: 0;
+}
+
+.pledge-card h2 {
+    color: var(--accent);
+    font-size: 1.9rem;
+    margin: 0 0 1rem;
+}
+
+.pledge-card p {
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    line-height: 1.75;
+    margin: 0;
+}
+
+.pledge-card em {
+    color: var(--text-primary);
+    font-style: italic;
+}
+
+/* Footer */
+.footer {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    text-align: center;
+    padding: 2rem;
+    border-top: 1px solid var(--shadow-color);
+    transition: background 0.3s ease;
+}
+
+.footer a {
+    color: var(--primary-light);
+    text-decoration: none;
+}
+
+.footer a:hover {
+    text-decoration: underline;
+}
+
+.footer .open-source-notice {
+    margin-top: 0.5rem;
+    font-size: 0.9rem;
+    opacity: 0.7;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .hero h1 {
+        font-size: 2.5rem;
+    }
+
+    .hero p {
+        font-size: 1.1rem;
+    }
+
+    .logo {
+        width: 140px;
+        height: 140px;
+    }
+
+    .features h2 {
+        font-size: 2rem;
+    }
+}
+
+/* ── E2E flow diagram section ─────────────────────────────────────────── */
+.flow {
+    padding: 5rem 2rem;
+    background: var(--bg-primary);
+    transition: background 0.3s ease;
+}
+
+.flow-container {
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+.flow h2 {
+    text-align: center;
+    font-size: 2.5rem;
+    color: var(--text-primary);
+    margin-bottom: 1rem;
+}
+
+.flow-intro {
+    text-align: center;
+    color: var(--text-secondary);
+    max-width: 700px;
+    margin: 0 auto 3rem;
+}
+
+.flow-diagram {
+    overflow-x: auto;
+    text-align: center;
+}
+
+.flow-diagram svg {
+    max-width: 100%;
+    height: auto;
+}
+
+.flow-block {
+    margin-bottom: 3.5rem;
+}
+
+.flow-block h3 {
+    color: var(--text-primary);
+    font-size: 1.4rem;
+    margin-bottom: 1rem;
+    text-align: center;
+}
+
+/* Accordion (index) */
+details.flow-block {
+    margin-bottom: 0.9rem;
+    border: 1px solid var(--border-color, rgba(127,127,127,0.25));
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    overflow: hidden;
+}
+
+details.flow-block summary {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    padding: 0.95rem 1.2rem;
+    cursor: pointer;
+    list-style: none;
+    color: var(--text-primary);
+    font-size: 1.05rem;
+    font-weight: 600;
+    user-select: none;
+}
+
+details.flow-block summary::-webkit-details-marker {
+    display: none;
+}
+
+details.flow-block summary:hover {
+    background: rgba(127, 127, 127, 0.08);
+}
+
+.flow-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+.flow-icon svg {
+    display: block;
+}
+
+.flow-chevron {
+    margin-left: auto;
+    color: var(--text-secondary);
+    transition: transform 0.2s ease;
+}
+
+details.flow-block[open] .flow-chevron {
+    transform: rotate(180deg);
+}
+
+/* Während der Zuklapp-Animation bleibt [open] noch gesetzt — Chevron
+   trotzdem sofort zurückdrehen (Klasse setzt flow-diagram.js). */
+details.flow-block.closing .flow-chevron {
+    transform: rotate(0deg);
+}
+
+details.flow-block .flow-diagram {
+    padding: 0.5rem 1rem 1.25rem;
+}
+
+/* Expanded page (technik.html) */
+.flow-page {
+    min-height: 100vh;
+}
+
+.flow-block-expanded {
+    margin-bottom: 3.5rem;
+}
+
+.flow-block-expanded h3 {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+}
+
+.flow-back {
+    margin-bottom: 1.5rem;
+}
+
+.flow-back a,
+.flow-all-link a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-bottom: 1px dotted currentColor;
+}
+
+.flow-back a:hover,
+.flow-all-link a:hover {
+    color: var(--text-primary);
+}
+
+.flow-all-link {
+    text-align: center;
+    margin-top: 2rem;
+}
+
+/* Hero extras */
+.hero-actions {
+    display: flex;
+    gap: 0.9rem;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.cta-secondary {
+    background: transparent !important;
+    border: 2px solid currentColor;
+}
+
+.hero-platforms {
+    margin-top: 1rem;
+    font-size: 0.9rem;
+    opacity: 0.75;
+}
+
+.hero-disclaimer {
+    margin-top: 0.9rem;
+    max-width: 560px;
+    margin-left: auto;
+    margin-right: auto;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    opacity: 0.6;
+}
+
+/* Feature icons as SVG */
+.feature-icon svg {
+    display: block;
+    margin: 0 auto;
+}
+
+/* ── Diagramm im Vollbild ──────────────────────────────────────────────────
+   Gegenstück zu cms/web/assets/css/site.css — beide Seiten zeigen dieselben
+   Diagramme, also verhalten sie sich gleich. Ein Sequenzdiagramm ist ~1500 px
+   breit; in eine Handyspalte skaliert ist es nicht mehr lesbar, deshalb
+   öffnet ein Tipp es formatfüllend (flow-diagram.js). */
+.flow-diagram[data-zoomable="1"]{cursor:zoom-in;}
+.flow-diagram[data-zoomable="1"]:focus-visible{outline:2px solid var(--primary-light); outline-offset:4px;}
+body.mmd-full-lock{overflow:hidden;}
+
+.mmd-full{position:fixed; inset:0; z-index:2000; display:none; flex-direction:column;
+  background:var(--bg-primary);}
+.mmd-full.open{display:flex;}
+.mmd-full-bar{display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:10px 14px; background:var(--bg-card); box-shadow:0 1px 4px var(--shadow-color);}
+.mmd-full-title{font-size:14px; font-weight:600; color:var(--text-primary);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.mmd-full-btns{display:flex; gap:6px; flex:none;}
+.mmd-full-btns button{font-size:14px; line-height:1; color:var(--text-primary);
+  background:var(--bg-secondary); border:1px solid var(--shadow-color); border-radius:6px;
+  padding:8px 12px; cursor:pointer; min-width:40px; min-height:40px;}
+.mmd-full-btns button:hover{border-color:var(--primary-light); color:var(--primary-light);}
+.mmd-full-btns button:focus-visible{outline:2px solid var(--primary-light); outline-offset:2px;}
+
+/* touch-action:none — sonst greift die Wisch-Geste des Browsers und die
+   eigene Zwei-Finger-Zoomlogik bekommt die Ereignisse nie zu sehen. */
+.mmd-full-stage{flex:1; overflow:hidden; position:relative; touch-action:none; cursor:grab;}
+.mmd-full-stage:active{cursor:grabbing;}
+.mmd-full-inner{position:absolute; inset:0; display:flex; align-items:center;
+  justify-content:center; transform-origin:center center;}
+.mmd-full-inner svg{max-width:none !important; width:auto; height:auto;}
+.mmd-full-hint{padding:8px 14px; text-align:center; font-size:12px;
+  color:var(--text-secondary); background:var(--bg-card);}
+
+@media (max-width:560px){
+  .mmd-full-title{display:none;}
+  .mmd-full-btns{width:100%; justify-content:space-between;}
+}

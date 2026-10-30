@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Serves the Android APK + its update manifest from the netcup box.
+#
+# This is a FRAGMENT to add INSIDE the existing `chattr.geraldhofbauer.net { … }`
+# site block (the landing vhost), so /download/ lives on the same host the app
+# already talks to. Add the `handle_path` below next to the landing file_server,
+# then `caddy reload` (needs sudo/root on the box).
+#
+# The pipeline (bitbucket-pipelines.yml → "Build & Publish Android APK") rsyncs
+# chattr.apk + manifest.json to /home/chattr/app/downloads/ — a sibling of the
+# landing root, kept OUTSIDE the `rsync --delete` landing sync so a landing
+# deploy never wipes the APK.
+#
+# chattr.at is deferred: when the cutover happens, add `chattr.at` as another
+# server name on this block — no change to the download handler itself.
+
+# ── paste this inside chattr.geraldhofbauer.net { … } ──
+handle_path /download/* {
+	root * /home/chattr/app/downloads
+	# APK downloads as an attachment; the JSON manifest stays inline so the
+	# in-app updater (and curl in the pipeline's downgrade guard) can read it.
+	@apk path *.apk
+	header @apk Content-Disposition "attachment"
+	header /manifest.json {
+		Cache-Control "no-cache, must-revalidate"
+		Content-Type "application/json"
+	}
+	# Der Wartungsschalter (`lib/core/init/maintenance_flag.dart`). `no-cache`
+	# ist hier keine Feinheit, sondern der Sinn der Sache: Eine zwischen-
+	# gespeicherte Antwort „keine Wartung" waere genau in dem Moment falsch, in
+	# dem die Datei gerade gesetzt wurde — der Schalter wuerde stumm nicht
+	# greifen. Anlegen zum Einschalten:
+	#   echo '{"maintenance": true}' > /home/chattr/app/downloads/maintenance.json
+	# Ausschalten: die Datei loeschen (fehlt sie, ist es keine Wartung).
+	header /maintenance.json {
+		Cache-Control "no-cache, must-revalidate"
+		Content-Type "application/json"
+	}
+	file_server
+}
+
+# Standalone alternative — if you'd rather serve it from its own vhost instead
+# of a path on the landing site, use this block on its own (then apk_url +
+# APP_DOWNLOAD_BASE point at https://downloads.chattr.geraldhofbauer.net):
+#
+# downloads.chattr.geraldhofbauer.net {
+# 	root * /home/chattr/app/downloads
+# 	@apk path *.apk
+# 	header @apk Content-Disposition "attachment"
+# 	file_server browse
+# }

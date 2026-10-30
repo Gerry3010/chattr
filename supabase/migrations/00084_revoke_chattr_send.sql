@@ -1,0 +1,31 @@
+-- ============================================================================
+-- 00084: `chattr_send` is no longer callable by clients
+-- ============================================================================
+--
+-- `chattr_send` (00063, 00080) is the one door into every user's private event
+-- bus: it calls `realtime.send` on `p:<topic>` as SECURITY DEFINER, so whoever
+-- may EXECUTE it can write into ANY user's channel. It was never revoked, and
+-- Postgres grants EXECUTE on new functions to PUBLIC — so `anon` and
+-- `authenticated` could reach it through PostgREST as
+-- `rpc('chattr_send', {payload, event: 'event', topic: 'user:<victim>'})`,
+-- with nothing more than the anon key every client ships.
+--
+-- What that bought an attacker: forged bus events. The client trusts the bus —
+-- that is its whole design — and some events act destructively on the device.
+-- A forged `chatDeleted` makes the victim's app remove the chat AND its cached
+-- messages from the local database, which is the only readable copy of
+-- anything already received (the server clears ciphertext on delivery). It
+-- needs the victim's user id and the chat id; both are known to every member
+-- and ex-member of that chat.
+--
+-- Found 2026-10-03 while mapping the bus for call signaling. Every legitimate
+-- caller is a SECURITY DEFINER trigger/RPC owned by `postgres` (14 of them,
+-- checked via pg_proc), so revoking from the client roles breaks none of them.
+--
+-- Not in scope here, but the same class: any future helper that wraps
+-- `realtime.send` needs the same three REVOKEs in the migration that creates
+-- it. supabase/tests/chattr_send_not_callable.sql pins this one.
+-- ============================================================================
+
+REVOKE ALL ON FUNCTION public.chattr_send(JSONB, TEXT, TEXT, BOOLEAN)
+  FROM PUBLIC, anon, authenticated;

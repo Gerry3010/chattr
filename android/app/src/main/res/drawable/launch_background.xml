@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net> -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!--
+  Window background while the process starts, BEFORE Flutter draws its first
+  frame. Was a bare white rectangle (the Flutter default), which on a dark
+  device meant a white flash followed by a dark app.
+
+  The app icon itself is the image on purpose: it is what the user just tapped,
+  so the launch reads as a continuation rather than an unrelated screen — and
+  unlike the bare wordmark (near-white with a gradient) it keeps its contrast on
+  a light background too.
+
+  Android 12+ ignores this and uses its own splash API — see values-v31/styles.xml.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/splash_background" />
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/splash_logo" />
+    </item>
+</layer-list>

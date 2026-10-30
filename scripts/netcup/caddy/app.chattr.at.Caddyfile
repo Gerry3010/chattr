@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Web app on nc-chattr since 2026-10-11 (before: app.chattr.geraldhofbauer.net).
+# Mirror of the live block in /etc/caddy/Caddyfile.
+#
+# GREY in Cloudflare on purpose: the privacy policy promises that the app talks
+# to our server directly, and a proxied host would also cache main.dart.js past
+# every deploy. So Caddy needs a public certificate of its own.
+#
+# FALLE: the Cloudflare origin certificate loaded for chattr.at covers
+# *.chattr.at. Caddy then logs "skipping automatic certificate management
+# because one or more matching certificates are already loaded" and serves
+# that origin cert, which browsers reject outside Cloudflare. `issuer acme`
+# below is not enough on its own; the global option
+#     auto_https ignore_loaded_certs
+# (in the `{ … }` block at the top of the Caddyfile) is what makes Caddy
+# fetch the Let's Encrypt cert. chattr.at itself keeps serving its origin cert.
+app.chattr.at {
+	# CSP — vorerst NUR BERICHT. Scharfschalten erst, wenn die Konsole beim
+	# echten Durchklicken keine Verstoesse mehr meldet: Eine fehlende Quelle
+	# ergibt bei Flutter einen weissen Bildschirm, keine Fehlermeldung.
+	header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline' https://www.gstatic.com https://www.youtube.com https://*.ytimg.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https://api.chattr.geraldhofbauer.net https://v.redd.it; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://api.chattr.geraldhofbauer.net wss://api.chattr.geraldhofbauer.net https://*.googleapis.com https://www.gstatic.com https://fonts.gstatic.com https://v.redd.it https://*.redd.it https://*.youtube.com https://*.ytimg.com; frame-src https://www.youtube.com https://www.youtube-nocookie.com; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+	# Sicherheits-Kopfzeilen (2026-08-21, ZAP-Funde aus dem woechentlichen Scan).
+	# max-age bewusst 6 Monate und OHNE preload: Ein Fehler altert von selbst aus,
+	# ein Preload-Eintrag nicht — der ist praktisch unumkehrbar.
+	header {
+		Strict-Transport-Security "max-age=15768000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		# Microphone and camera for this origin only (2026-10-12). With "()" the
+		# browser refused both regardless of the site permission: web calls,
+		# voice messages and the camera had never worked here.
+		Permissions-Policy "geolocation=(), microphone=(self), camera=(self), payment=(), usb=()"
+		Cross-Origin-Opener-Policy "same-origin"
+	}
+	root * /home/chattr/app/web
+	try_files {path} /index.html
+	file_server
+	tls {
+		issuer acme
+	}
+}

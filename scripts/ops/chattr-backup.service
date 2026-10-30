@@ -1,0 +1,10 @@
+[Unit]
+Description=Chattr: verschlüsselte Sicherung (CHAT-26)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/chattr-backup
+Nice=10
+IOSchedulingClass=idle

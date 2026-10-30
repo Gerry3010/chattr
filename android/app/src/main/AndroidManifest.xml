@@ -1,0 +1,138 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- In-app auto-update (sideloaded APK channel, no Play Store): let the app
+         hand a freshly downloaded APK to the system package installer. The user
+         still grants "install unknown apps" + confirms in the OS prompt; this
+         only launches the installer. open_filex supplies its own FileProvider. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- Eigene Kamera-Ansicht (Shot-Aufnahme). CAMERA kommt heute nur über die
+         Manifest-Zusammenführung von mobile_scanner herein — zu wenig, um sich
+         darauf zu verlassen, wenn eine zweite Stelle sie braucht.
+         RECORD_AUDIO ist NICHT dabei und muss hier stehen: Ohne sie nimmt das
+         Video je nach Gerät stumm auf oder scheitert, und beides fällt erst
+         beim Abspielen auf. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- Audio calls (flutter_webrtc): route audio between earpiece, speaker
+         and headset, and keep a Bluetooth headset in the loop. BLUETOOTH is
+         only the pre-Android-12 spelling of BLUETOOTH_CONNECT. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <!-- A call in the background (CallForegroundService): without a foreground
+         service of type phoneCall|microphone Android mutes the app and takes the
+         microphone the moment it leaves the screen. MANAGE_OWN_CALLS is what the
+         phoneCall type requires of an app that is not the dialer. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS"/>
+    <!-- Kamera ist nicht Voraussetzung: Ein Gerät ohne sie soll Chattr trotzdem
+         installieren können — der Aufnahme-Weg blendet sich dort aus. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
+    <application
+        android:label="chattr"
+        android:name="${applicationName}"
+        android:icon="@mipmap/launcher_icon"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:largeHeap="true"><!-- largeHeap: media pick/encrypt holds the
+        whole file + ciphertext in RAM (no streaming yet); keeps a ~100 MB+
+        photo/video from OOM-crashing the pick. See MediaRepository.maxInMemoryBytes.
+        --><!-- audit #149: no cloud/adb backup of the
+        app sandbox. A backup RESTORE onto another device brings the encrypted
+        secure-storage back but NOT the AndroidKeyStore master key, so the keys
+        can't be decrypted → resetOnError would wipe + silently re-key (the Galaxy
+        class of bug). E2E keys must never leave the device anyway. -->
+        <service
+            android:name=".CallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall|microphone"/>
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- Share target: receive text and files from other apps
+                 (handled by share_handler → ShareTargetService). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
+                <data android:mimeType="image/*"/>
+                <data android:mimeType="video/*"/>
+                <data android:mimeType="audio/*"/>
+                <data android:mimeType="application/*"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="image/*"/>
+                <data android:mimeType="video/*"/>
+                <data android:mimeType="audio/*"/>
+                <data android:mimeType="application/*"/>
+            </intent-filter>
+            <!-- QuickShare: declares the <share-target> that lets recent chats
+                 show up as PEOPLE in the Direct Share row above the app list.
+                 The intent filters alone only get the app into the list below.
+                 The conversations are published at runtime by
+                 ShareSuggestionsChannel.kt. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity>
+        <!-- Icon + accent for notifications Android renders ITSELF (an FCM
+             payload that arrives with a notification block while the app is
+             backgrounded). Without these, Android falls back to the launcher
+             icon, which it masks to a solid white blob because notification
+             icons are drawn as a silhouette. The same drawable is used by the
+             locally-rendered notifications in FCMService. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_stat_chattr" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/notification_accent" />
+        <!-- CHAT-33: the share_handler fork rejects shared URIs served by this
+             app's own providers (open_filex exposes the whole data dir, so a
+             share could hand Chattr its own database as an attachment). The
+             one exception is share_plus' provider, which only exposes files
+             Chattr itself put up for sharing: forwarding Chattr → Chattr
+             through the system sheet keeps working. -->
+        <meta-data
+            android:name="com.shoutsocial.share_handler.ALLOWED_OWN_AUTHORITIES"
+            android:value="${applicationId}.flutter.share_provider" />
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

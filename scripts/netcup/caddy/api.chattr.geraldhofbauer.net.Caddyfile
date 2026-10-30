@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Supabase API (Kong), baked into every app. Mirror of the live block in
+# /etc/caddy/Caddyfile.
+#
+# Kong announces itself on every answer (Server: kong/2.8.1, X-Kong-*). That
+# fixes nothing and tells a scanner which known holes to try (CHAT-29), so the
+# headers stop here. The real lever is a Kong update, which follows Supabase.
+api.chattr.geraldhofbauer.net {
+	reverse_proxy 127.0.0.1:8000 {
+		header_down -Server
+		header_down -X-Kong-*
+		# Edge functions also come back with "Via: kong/2.8.1".
+		header_down -Via
+	}
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+}

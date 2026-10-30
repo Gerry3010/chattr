@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# gitleaks — committed-credentials scanner. Complements GitHub's native secret
+# scanning + push protection (enabled on the repo settings): this one runs in CI
+# on every push/PR and the full history on a schedule, and is portable if the
+# mirror ever moves. Free for public repos (no GITLEAKS_LICENSE needed).
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1" # Monday 03:17 UTC
+  workflow_dispatch:
+
+jobs:
+  scan:
+    name: gitleaks scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Point at the allowlist explicitly rather than relying on gitleaks
+          # finding `.gitleaks.toml` by itself — which config a scan ran with is
+          # the one thing about this job that must not be guesswork.
+          GITLEAKS_CONFIG: .gitleaks.toml

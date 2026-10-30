@@ -1,0 +1,17 @@
+{
+  "name": "Profanität (DE)",
+  "description": "Häufige deutsche Schimpfwörter — Teilstring, Groß-/Kleinschreibung egal. Scannt nur Benutzer-/Gruppennamen, nie Nachrichten; erzeugt Review-Signale (kein Auto-Ban). Aus der öffentlichen LDNOOBW-Liste abgeleitet; für deine Community anpassen.",
+  "source": "preset",
+  "_provenance": "Auszug adaptiert aus LDNOOBW (github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words).",
+  "terms": [
+    { "pattern": "arschloch", "category": "profanity" },
+    { "pattern": "scheisse", "category": "profanity" },
+    { "pattern": "scheiße", "category": "profanity" },
+    { "pattern": "fotze", "category": "profanity" },
+    { "pattern": "hurensohn", "category": "profanity" },
+    { "pattern": "wichser", "category": "profanity" },
+    { "pattern": "schlampe", "category": "profanity" },
+    { "pattern": "missgeburt", "category": "profanity" },
+    { "pattern": "hure", "category": "profanity" }
+  ]
+}

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Chattr – Ende-zu-Ende verschlüsselte Kommunikation. Privat. Sicher. Einfach.">
+  <meta name="theme-color" content="#0A0A0A">
+
+  <!-- Open Graph / social share preview -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Chattr">
+  <meta property="og:title" content="Chattr – Sichere verschlüsselte Chats">
+  <meta property="og:description" content="Ende-zu-Ende verschlüsselte Kommunikation. Privat. Sicher. Einfach.">
+  <meta property="og:url" content="https://app.chattr.at">
+  <meta property="og:image" content="https://app.chattr.at/icons/Icon-512.png">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Chattr – Sichere verschlüsselte Chats">
+  <meta name="twitter:description" content="Ende-zu-Ende verschlüsselte Kommunikation. Privat. Sicher. Einfach.">
+  <meta name="twitter:image" content="https://app.chattr.at/icons/Icon-512.png">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Chattr">
+  <!-- Square, opaque icon: iOS applies its own rounded mask to home-screen
+       icons, so a pre-rounded (transparent-corner) icon would show black
+       corners. The rounded variant is used for the browser-tab favicon. -->
+  <link rel="apple-touch-icon" href="icons/Icon-maskable-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Chattr</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- Branded loading splash shown until Flutter paints its first frame -->
+  <style>
+    #splash {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 28px;
+      background: #0A0A0A;
+      transition: opacity .35s ease;
+    }
+    #splash.hide { opacity: 0; pointer-events: none; }
+    #splash img { width: 96px; height: 96px; }
+    #splash .spinner {
+      width: 34px;
+      height: 34px;
+      border: 3px solid rgba(0, 255, 65, 0.18);
+      border-top-color: #00FF41;
+      border-radius: 50%;
+      animation: chattr-spin .9s linear infinite;
+    }
+    @keyframes chattr-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      #splash .spinner { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Removed by the flutter-first-frame handler below. -->
+  <div id="splash">
+    <img src="icons/Icon-192.png" alt="Chattr">
+    <div class="spinner"></div>
+  </div>
+
+  <script>
+    // Fade the splash out as soon as Flutter renders its first frame.
+    window.addEventListener('flutter-first-frame', function () {
+      var splash = document.getElementById('splash');
+      if (!splash) return;
+      splash.classList.add('hide');
+      window.setTimeout(function () { splash.remove(); }, 400);
+    });
+  </script>
+  <!-- Firebase SDK -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script> <!-- nosemgrep: missing-integrity -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js"></script> <!-- nosemgrep: missing-integrity -->
+  
+  <script>
+    // Initialize Firebase
+    const firebaseConfig = {
+      apiKey: "YOUR_FIREBASE_API_KEY", // nosemgrep: detected-generic-api-key -- public Firebase Web config, not a secret // gitleaks:allow
+      authDomain: "your-firebase-project.firebaseapp.com",
+      projectId: "your-firebase-project",
+      storageBucket: "your-firebase-project.firebasestorage.app",
+      messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+      appId: "YOUR_FIREBASE_APP_ID"
+    };
+    
+    firebase.initializeApp(firebaseConfig);
+    
+    // Register service worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('firebase-messaging-sw.js')
+        .then((registration) => {
+          console.log('Service Worker registered:', registration);
+        })
+        .catch((error) => {
+          console.error('Service Worker registration failed:', error);
+        });
+    }
+  </script>
+
+  <!-- Seamless service-worker updates.
+       Flutter's generated flutter_service_worker.js already calls
+       skipWaiting() on install and clients.claim() on activate, so a freshly
+       deployed version activates immediately and takes control of pages that
+       are already open. Without the snippet below, such a page would keep its
+       pre-deploy in-memory assets (JS + the easy_localization JSON, etc.) until
+       a manual hard refresh — that's how new i18n keys showed up as raw keys
+       after a deploy. Here we reload the page once when a NEW worker takes
+       control, and proactively poll for an update when the tab regains focus
+       (plus a periodic safety net) so long-open tabs pick up a deploy. -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      // A controller already present at load time means this is a returning
+      // page; the FIRST ever visit fires controllerchange via clients.claim()
+      // with no prior controller — that's the initial install, not an update,
+      // so we must not reload then (would loop on first load).
+      var hadController = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        var ctrl = navigator.serviceWorker.controller;
+        if (!ctrl || ctrl.scriptURL.indexOf('flutter_service_worker') === -1) return;
+        if (!hadController) { hadController = true; return; }
+        // Hard loop-breaker: auto-reload at most once per 60s, tracked in
+        // sessionStorage so it survives the reload itself. If a deploy
+        // transition produces more than one controllerchange (e.g. the loader
+        // re-registers the worker under a new ?v= right after), the extra ones
+        // within the window are ignored — so this can never become a refresh
+        // loop, while a genuinely new version minutes later still reloads once.
+        var now = Date.now();
+        var last = parseInt(sessionStorage.getItem('__swReloadAt') || '0', 10);
+        if (now - last < 60000) return;
+        sessionStorage.setItem('__swReloadAt', String(now));
+        window.location.reload();
+      });
+
+      var checkForUpdate = function () {
+        navigator.serviceWorker.getRegistrations()
+          .then(function (regs) { regs.forEach(function (r) { r.update(); }); })
+          .catch(function () {});
+      };
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') checkForUpdate();
+      });
+      window.addEventListener('focus', checkForUpdate);
+      setInterval(checkForUpdate, 5 * 60 * 1000);
+    }
+  </script>
+
+  <!-- Post-quantum hybrid KEM (X25519 + ML-KEM-768) for web, bundled from
+       web_crypto/ via esbuild. Loaded synchronously before Flutter so
+       globalThis.chattrCrypto is ready when the app encrypts/decrypts. -->
+  <script src="chattr_crypto.js"></script>
+  <!-- Lock the crypto entry point (CHAT-40): a plain global could be swapped
+       by any other script on the page, and every encrypt/decrypt would then
+       run through the replacement. Frozen and non-writable from here on. -->
+  <script>
+    (function () {
+      var c = globalThis.chattrCrypto;
+      if (c) {
+        Object.defineProperty(globalThis, 'chattrCrypto', {
+          value: Object.freeze(c),
+          writable: false,
+          configurable: false,
+        });
+      }
+    })();
+  </script>
+
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

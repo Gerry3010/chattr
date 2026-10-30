@@ -1,0 +1,43 @@
+-- ============================================================================
+-- 00079: avatar stores private — the second half of 00075
+-- ----------------------------------------------------------------------------
+-- 00075 was pulled out of 1.22.0 on 2026-08-13 (9ecfd1f), because a client not
+-- yet updated goes on building its image addresses with `getPublicUrl` and,
+-- against a private bucket, shows nothing but initials circles. The harmless
+-- half — reading for signed-in users only — has since been applied as 00078.
+-- What remained is the one line here.
+--
+-- Measured against prod immediately before this migration (2026-08-20), with
+-- nothing but the anon key that sits in every web app anyway:
+--
+-- POST /storage/v1/object/list/avatars → [] (00078 works) GET
+-- /storage/v1/object/public/avatars/<uuid>/… → 200, 472 KB
+--
+-- So listing is dead, the direct fetch lived on: a `public = true` on the
+-- bucket serves `/object/public/...` **past RLS**. The policy from 00078 is
+-- never asked on that route. Whoever knows a path — from an older dump, a log,
+-- an address passed around — gets the image without an account.
+--
+-- Afterwards the only route is a signed, short-lived address
+-- (`lib/features/profiles/avatar_url_cache.dart`, one hour). Signing runs on
+-- the same SELECT permission 00078 set — a signed-in client loses nothing.
+--
+-- FLEET (as of 2026-08-20, released by Gerry): 42 devices, 8 of them on 1.25.1.
+-- Of the 34 without a version, only 6 were active within seven days, and 5 of
+-- those are accounts from the TestFlight funnel without chats, without messages
+-- and without a profile picture. Two genuine old devices remained.
+--
+-- CAUTION on a fresh setup: 00015 (line 23) and 00055 (line 93) end in `ON
+-- CONFLICT (id) DO UPDATE SET public = true` and tear this open again. In
+-- numbered order 00079 runs after them — so the order here is not cosmetics, it
+-- carries the safeguard.
+--
+-- NO `COMMENT ON TABLE storage.buckets` — the table belongs to
+-- `supabase_storage_admin`, the migration user is not its owner and the
+-- migration would abort with "must be owner of table buckets". That is exactly
+-- what 00075 failed on at the first attempt.
+-- ============================================================================
+
+UPDATE storage.buckets
+   SET public = false
+ WHERE id IN ('avatars', 'group-avatars');

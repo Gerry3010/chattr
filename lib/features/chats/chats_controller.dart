@@ -1,0 +1,1503 @@
+// SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+import 'dart:async';
+import 'dart:typed_data';
+
+import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter/foundation.dart' show mapEquals, visibleForTesting;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
+
+import '../../core/events/event_bus_provider.dart';
+import '../../core/events/event_bus_service.dart';
+import '../../core/events/event_types.dart';
+import '../../core/lifecycle/app_lifecycle_service.dart';
+import '../../core/logging/logger_service.dart';
+import '../../core/security/biometric_auth_service.dart';
+import '../../core/security/chat_key_pair_manager.dart';
+import '../../core/security/kem_key_signer.dart';
+import '../../core/security/prekey_manager.dart';
+import '../../core/security/security_providers.dart';
+import '../share_suggestions/share_suggestions_channel.dart';
+import '../../core/supabase/supabase_client_provider.dart';
+import '../app_lock/app_lock_controller.dart';
+import '../auth/auth_controller.dart';
+import '../chat_requests/chat_requests_controller.dart';
+import '../mcp/mcp_auto_join_controller.dart';
+import '../messages/drafts_repository.dart';
+import '../messages/messages_controller.dart';
+import '../messages/messages_local_provider.dart';
+import '../messages/global_message_handler.dart';
+import '../identity/installation_status.dart';
+import '../profiles/profiles_controller.dart';
+import '../profiles/profiles_repository.dart';
+import '../push_notifications/push_render_cache_sync.dart'
+    show cacheChatNameForPush;
+import 'chat_member_keys_repository.dart';
+import 'chat_members_controller.dart';
+import 'roster_store.dart';
+import 'chat_model.dart';
+import 'chat_removal_guard.dart';
+import 'new_chat_toast.dart';
+import 'chats_local_provider.dart';
+import 'chats_load_status.dart';
+import 'chats_local_repository.dart';
+import 'chats_repository.dart';
+import 'lost_keys_provider.dart';
+import 'unread_rules.dart' show readMarkerFor;
+import '../media/media_blob_store.dart';
+
+final chatsControllerProvider =
+    StateNotifierProvider<ChatsController, List<Chat>>((ref) {
+      final repo = ChatsRepository(ref.read(supabaseClientProvider));
+      final memberKeysRepo = ref.read(chatMemberKeysRepositoryProvider);
+      final localRepo = ref.read(chatsLocalRepositoryProvider);
+      final biometricAuth = ref.read(biometricAuthServiceProvider);
+      final keyManager = ref.read(chatKeyPairManagerProvider);
+      final eventBus = ref.watch(eventBusProvider);
+      final userId = ref.watch(authControllerProvider);
+      return ChatsController(
+        ref,
+        repo,
+        memberKeysRepo,
+        localRepo,
+        biometricAuth,
+        keyManager,
+        eventBus,
+        userId,
+      );
+    });
+
+final chatProvider = Provider.family.autoDispose<Chat?, String>((ref, chatId) {
+  final chatsController = ref.watch(chatsControllerProvider);
+  return chatsController.where((chat) => chat.id == chatId).firstOrNull;
+});
+
+/// Computes the `lastMessageAt` sort key for a chat the LOCAL user just sent
+/// to, so it always floats to the top of the list.
+///
+/// The sender stamps its send timestamp from its own device clock, while every
+/// other chat's sort key comes from a different device / the server. If the
+/// local clock lags (or a media timestamp was captured at upload-start), the
+/// raw local timestamp can be *older* than another chat's key and the just-sent
+/// chat would stay stuck below it even after re-sorting. This returns a value
+/// strictly newer than the newest OTHER chat whenever [lastMessageAt] isn't
+/// already the maximum — otherwise it returns [lastMessageAt] unchanged.
+@visibleForTesting
+DateTime? bumpedSortTimestamp({
+  required List<Chat> chats,
+  required String chatId,
+  required DateTime? lastMessageAt,
+}) {
+  if (lastMessageAt == null) return null;
+  DateTime? maxOther;
+  for (final c in chats) {
+    if (c.id == chatId) continue;
+    final d = c.sortDate;
+    if (maxOther == null || d.isAfter(maxOther)) maxOther = d;
+  }
+  if (maxOther != null && !lastMessageAt.isAfter(maxOther)) {
+    return maxOther.add(const Duration(milliseconds: 1));
+  }
+  return lastMessageAt;
+}
+
+/// [chats] with [patch] applied to the chat whose id is [chatId], everything
+/// else untouched and in place. Never by index: a position computed before an
+/// `await` may belong to another chat by the time it is written.
+List<Chat> patchChatById(
+  List<Chat> chats,
+  String chatId,
+  Chat Function(Chat) patch,
+) =>
+    [for (final c in chats) c.id == chatId ? patch(c) : c];
+
+/// ChatList ordering: pinned chats first (#3), then most-recent by [Chat.sortDate].
+/// A single source of truth so every sort site (load, refresh, metadata bump)
+/// agrees on the order.
+int compareChatsForList(Chat a, Chat b) {
+  if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
+  return b.sortDate.compareTo(a.sortDate);
+}
+
+class ChatsController extends StateNotifier<List<Chat>> {
+  final Ref ref;
+  final ChatsRepository repo;
+  final ChatMemberKeysRepository memberKeysRepo;
+  final ChatsLocalRepository localRepo;
+  final BiometricAuthService biometricAuth;
+  final ChatKeyPairManager keyManager;
+  final EventBusService? eventBus;
+  final String? userId;
+
+  StreamSubscription<BusEvent>? _eventSub;
+  StreamSubscription<void>? _resumeSub;
+  StreamSubscription<void>? _returnSub;
+  StreamSubscription<void>? _resubscribedSub;
+
+  /// Guards against overlapping resyncs when the app rapidly pauses/resumes.
+  bool _resyncing = false;
+  bool _resyncQueued = false;
+
+  /// Chats the current user initiated locally (created / scanned-and-added).
+  /// Their `newChat` — whether from the local addChat call or the echoed
+  /// realtime broadcast — must NOT raise the "you were added" toast (#117);
+  /// only chats someone ELSE adds me to (realtime-only, never marked) do.
+  final Set<String> _selfInitiatedChatIds = {};
+
+
+  ChatsController(
+    this.ref,
+    this.repo,
+    this.memberKeysRepo,
+    this.localRepo,
+    this.biometricAuth,
+    this.keyManager,
+    this.eventBus,
+    this.userId,
+  ) : super([]) {
+    if (userId != null && eventBus != null) {
+      _init();
+    }
+  }
+
+  Map<String, Chat> _stateMap = {};
+
+  set stateMap(Map<String, Chat> value) {
+    _stateMap = value;
+    super.state = value.values.toList()
+      ..sort(compareChatsForList);
+  }
+
+  @override
+  set state(List<Chat> value) {
+    super.state = value;
+    _stateMap = Map.fromEntries(value.map((chat) => MapEntry(chat.id, chat)));
+  }
+
+  Map<String, Chat> get stateMap => _stateMap;
+
+  Map<String, Chat> get chatsById =>
+      Map.fromEntries(state.map((chat) => MapEntry(chat.id, chat)));
+
+  /// Whether the biometric gate has already been passed this session. The
+  /// controller is recreated whenever the event bus / auth providers change, so
+  /// without this flag the user would be re-prompted for biometrics on every
+  /// rebuild. Reset on logout via [resetBiometricGate].
+  static bool _biometricUnlocked = false;
+
+  /// Reset the biometric gate (call on logout so the next user re-authenticates).
+  static void resetBiometricGate() => _biometricUnlocked = false;
+
+  /// Set while [_init] runs, so an unlock and a resume arriving together
+  /// start it once.
+  bool _initializing = false;
+
+  /// [_init] got all the way through and wired its listeners. Until then a
+  /// resume retries the start instead of catching up.
+  bool _started = false;
+
+  void Function()? _cancelUnlockWait;
+
+  void _setLoadStatus(ChatsLoadStatus status) {
+    if (!mounted) return;
+    ref.read(chatsLoadStatusProvider.notifier).state = status;
+  }
+
+  /// A VoIP push can start the app on iOS in the background, phone locked.
+  /// Face ID asked there fails at once, so the gate waits until the user is
+  /// actually in front of the app.
+  Future<void> _untilForeground() async {
+    if (ref.read(appInForegroundProvider)()) return;
+    await ref.read(appLifecycleServiceProvider).onResume.first;
+  }
+
+  /// Members and peer profiles as this device last saw them (CHAT-62), read
+  /// before the list goes up so a 1:1 shows its peer's name on the first
+  /// frame, with or without network. Failure only costs the names.
+  Future<void> _hydrateRoster() async {
+    try {
+      final store = ref.read(rosterStoreProvider);
+      ref.read(chatMembersCacheProvider).hydrate(await store.loadMembers());
+      ref
+          .read(profilesControllerProvider.notifier)
+          .hydrate(await store.loadProfiles());
+    } catch (e) {
+      logger.warning('Roster not loaded: $e', tag: 'ChatsController');
+    }
+  }
+
+  /// "Erneut versuchen" on the chat list after a start that failed.
+  Future<void> retryLoad() => _init();
+
+  Future<void> _init() async {
+    if (_initializing || _started) return;
+    _initializing = true;
+    try {
+      // Subscribed first: a start that did not get through (gate, error) is
+      // retried when the user comes back to the app; once started, every
+      // resume is a catch-up. The retry listens to onReturn, not onResume:
+      // closing the fingerprint prompt resumes the app, and asking again
+      // right then looped the prompt after every cancel.
+      final lifecycle = ref.read(appLifecycleServiceProvider);
+      _resumeSub ??= lifecycle.onResume.listen((_) {
+        if (_started) _handleResume();
+      });
+      _returnSub ??= lifecycle.onReturn.listen((_) {
+        if (!_started) _init();
+      });
+
+      // Biometric gate — prompt only once per session, not on every rebuild.
+      if (!_biometricUnlocked) {
+        await _untilForeground();
+        if (!mounted) return;
+        final authenticated = await biometricAuth.authenticate(
+          localizedReason: 'Authenticate to load your chats',
+        );
+        if (!mounted) return;
+        if (!authenticated) {
+          // Not "no chats": the lock screen goes up and the start runs again
+          // once it lifts. Before 2026-10-23 the list just stayed empty and
+          // said "Noch keine Chats" until the app was killed.
+          logger.warning(
+            'Biometric gate blocked chat loading — locked until unlocked',
+            tag: 'ChatsController',
+          );
+          _setLoadStatus(ChatsLoadStatus.locked);
+          _cancelUnlockWait?.call();
+          _cancelUnlockWait = ref
+              .read(appLockControllerProvider.notifier)
+              .waitForUnlock(() => unawaited(_init()));
+          return;
+        }
+        _biometricUnlocked = true;
+        if (_cancelUnlockWait != null) {
+          _cancelUnlockWait!();
+          _cancelUnlockWait = null;
+          ref.read(appLockControllerProvider.notifier).releaseGateLock();
+        }
+      }
+
+      // Load chats from local storage and sort by recency. The unread counts
+      // are recomputed from the local message store right here, so a cold start
+      // shows the truth immediately — even offline, where the first refresh may
+      // be a long way off. The persisted count is only ever a cache of this.
+      final chats = await _withLocalUnread(await localRepo.loadChats());
+      if (!mounted) return;
+      await _hydrateRoster();
+      if (!mounted) return;
+      stateMap = chats;
+      _setLoadStatus(ChatsLoadStatus.ready);
+
+      // Local media copies of messages that are gone (deleted, expired, chat
+      // left). Off the start path; the sweep has its own brakes.
+      unawaited(Future<void>.delayed(const Duration(seconds: 30), () async {
+        try {
+          final local = ref.read(messagesLocalRepositoryProvider);
+          final removed = await sweepOrphanMedia(
+            ref.read(mediaBlobStoreProvider),
+            existingIds: local.existingMessageIds,
+            messageCount: local.messageCount,
+          );
+          if (removed > 0) {
+            logger.info('Removed $removed orphaned media copies',
+                tag: 'ChatsController');
+          }
+        } catch (e) {
+          logger.warning('Media sweep skipped: $e', tag: 'ChatsController');
+        }
+      }));
+
+      // Initialize global message handler to process all incoming messages
+      // This ensures messages are decrypted and saved even for closed chats
+      ref.read(globalMessageHandlerProvider);
+
+      // Silently join any MCP chats bound to this user (no-op unless MCP is
+      // enabled — see McpAutoJoinController).
+      ref.read(mcpAutoJoinControllerProvider);
+
+      // Ensure this device has a long-term identity key BEFORE any per-chat key
+      // is registered (each is identity-signed — audit C1). Generation is
+      // local + fast (awaited); publishing it so peers can pin/verify is network
+      // and deferred so it never blocks chat loading.
+      await _ensureIdentityKey();
+      unawaited(_publishIdentityKey());
+
+      // Fetch chats from Supabase. Offline at start this throws; the local
+      // list stays and so do the listeners below, and the next resume or
+      // reconnect fetches. It used to fall into the catch at the end, which
+      // emptied the list and skipped every listener: "Noch keine Chats" until
+      // the app was killed.
+      try {
+        await refreshChats();
+      } catch (e) {
+        logger.warning('Initial chat refresh failed, keeping the local list: $e',
+            tag: 'ChatsController');
+      }
+
+      // Messages that arrived while the app was closed are only on the server;
+      // nothing else fetches them for a chat the user does not open. Deferred
+      // so it never blocks the first frame — refreshChats above already put
+      // the chat list on screen, and the counts follow a moment later.
+      unawaited(Future.microtask(() async {
+        try {
+          await ref.read(globalMessageHandlerProvider).catchUpUndelivered();
+          if (mounted) await refreshChats();
+        } catch (e) {
+          logger.warning('Start catch-up failed: $e', tag: 'ChatsController');
+        }
+      }));
+
+      // Backfill sender-side read receipts that fired while the app was closed
+      // (the realtime broadcast was missed). Deferred via microtask so it never
+      // blocks controller creation, and view-independent — it writes through the
+      // local DB regardless of which screen is open.
+      unawaited(Future.microtask(_reconcileSentReceipts));
+
+      // Subscribe to chat-relevant events from the single event stream.
+      _eventSub ??= eventBus!.eventStream.listen((event) {
+        if (event is NewChatEvent) {
+          _handleNewChat(event).then((v) => refreshChats([event.chatId]));
+        } else if (event is ChatUpdateEvent) {
+          refreshChats([event.chatId]);
+        } else if (event is ChatDeletedEvent) {
+          _handleChatDeleted(event);
+        } else if (event is PendingMemberEvent) {
+          _handlePendingMember(event);
+        } else if (event is MembershipChangedEvent) {
+          _handleMembershipChanged(event);
+        } else if (event is MemberKeyRegisteredEvent) {
+          // A co-member (e.g. a just-scanned peer) has now registered their
+          // per-chat key. Refresh so the chat reflects it and a sender who was
+          // blocked can send without reloading (#116). The send path re-fetches
+          // keys itself, so refreshing chat state is the only action needed here.
+          refreshChats([event.chatId]);
+        }
+      });
+
+      // On resume from background (subscribed at the top of this method):
+      // reconnect the (possibly dropped) realtime channel and re-fetch chats
+      // so unread badges reflect messages that arrived while we were away. As
+      // the sole owner of the event bus, this controller also drives the
+      // channel reconnect for the whole app.
+
+      // The realtime channel can also drop and recover WITHOUT an app-resume
+      // (in-place socket blip while foregrounded, #121). When the bus re-joins,
+      // catch up on whatever was broadcast during the dead window — the bus has
+      // already reconnected, so this only backfills.
+      _resubscribedSub ??=
+          eventBus!.onResubscribed.listen((_) => _handleResubscribed());
+      _started = true;
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to initialize chats controller',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      // Never empty the list here: what was read locally is still true. Only
+      // a start that has nothing on screen yet is a failure to name. The next
+      // resume tries again.
+      if (state.isEmpty) _setLoadStatus(ChatsLoadStatus.failed);
+    } finally {
+      _initializing = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _eventSub?.cancel();
+    _resumeSub?.cancel();
+    _returnSub?.cancel();
+    _resubscribedSub?.cancel();
+    _cancelUnlockWait?.call();
+    super.dispose();
+  }
+
+  /// Ask the app-global message handler to backfill sender-side receipts that
+  /// were missed while this client was closed/backgrounded. Its own try/catch
+  /// swallows failures, so this never throws into the lifecycle path.
+  Future<void> _reconcileSentReceipts() =>
+      ref.read(globalMessageHandlerProvider).reconcileSentReceipts();
+
+  /// Reconnect realtime and re-fetch chats after returning from the background.
+  Future<void> _handleResume() async {
+    await eventBus?.reconnect();
+    await _runCatchUp();
+  }
+
+  /// The realtime channel dropped and re-subscribed on its own while the app
+  /// stayed foregrounded (#121). Same backfill as [_handleResume] but WITHOUT
+  /// reconnecting — the bus already re-joined.
+  Future<void> _handleResubscribed() => _runCatchUp();
+
+  /// Coalesced catch-up: at most one runs at a time, but a request arriving
+  /// while one is in flight queues exactly one re-run instead of being dropped.
+  /// This matters under a rapid reconnect flap — a dropped catch-up would leave
+  /// the newest missed window un-backfilled and re-open the #121 staleness.
+  Future<void> _runCatchUp() async {
+    if (_resyncing) {
+      _resyncQueued = true;
+      return;
+    }
+    _resyncing = true;
+    try {
+      do {
+        _resyncQueued = false;
+        await _catchUpFromRealtimeGap();
+      } while (_resyncQueued);
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to catch up chats after realtime gap',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    } finally {
+      _resyncing = false;
+    }
+  }
+
+  /// Re-fetch everything a missed realtime window could have changed: chats /
+  /// unread counts, sender-side receipts, and the admin / my-request queues.
+  /// Shared by resume ([_handleResume]) and in-place resubscribe
+  /// ([_handleResubscribed]).
+  Future<void> _catchUpFromRealtimeGap() async {
+    // Messages first: everything below reads chat state, and the unread count
+    // is computed from what the device HOLDS. Fetching after the recount would
+    // leave the badge a beat behind — which is the whole bug this fixes.
+    await ref.read(globalMessageHandlerProvider).catchUpUndelivered();
+
+    await refreshChats();
+
+    // Receipts that landed while we weren't listening were broadcast to a client
+    // that wasn't receiving — backfill our sent-message ticks now.
+    await _reconcileSentReceipts();
+
+    // Join requests ("Beitrittsanfragen") refresh only via the (possibly missed)
+    // `pendingMember` broadcast, so re-fetch the admin queue for every chat we
+    // administer — otherwise requests that arrived during the gap never show up.
+    // Invalidate after refreshChats() so admin status is current.
+    if (userId != null) {
+      for (final chat in state) {
+        if (chat.isAdmin(userId!)) {
+          ref.invalidate(pendingMembersProvider(chat.id));
+        }
+      }
+      // Our own outgoing requests may have been approved/rejected while away
+      // (rejection sends no event to the requester at all), so re-fetch the
+      // "my requests" overview too.
+      ref.invalidate(myPendingRequestsProvider(userId!));
+    }
+  }
+
+  Future<void> refreshChats([Iterable<String>? chatIds]) async {
+    if (userId == null) return;
+
+    // Accepted - refetch the chat to get updated metadata (unread counts, etc.)
+    final chats = await repo.fetchChats(chatIds);
+    logger.info(
+      'refreshChats: server returned ${chats.length} chat(s)'
+      '${chatIds == null ? '' : ' (requested: ${chatIds.length})'}',
+      tag: 'ChatsController',
+    );
+
+    // Self-heal key registration: the `newChat` realtime broadcast is the only
+    // thing that generates+registers our per-chat key pair, so a missed event
+    // (reload, offline, race on join) would leave us permanently without a
+    // registered public key and make the chat undecryptable in both directions.
+    // Reconcile here so every chat we're a member of always has our current
+    // hybrid public key on the server.
+    for (final chat in chats) {
+      await _ensureMyKeyRegistered(chat.id);
+    }
+
+    // Load from local storage
+    final localChats = await localRepo.loadChats();
+
+    // Merge server + local (pure, unit-tested). Crucially the server result is
+    // taken into state for EVERY returned chat: the old diff only accepted
+    // chats whose `updatedAt` moved, but a chat that merely received messages
+    // never bumps `updatedAt` — its fresh unread count was written to the DB
+    // yet DROPPED from state, so state and DB alternated (badge flicker
+    // 118 ↔ 0 on every resume).
+    final merged = await _withLocalUnread(
+      mergeServerChats(localChats: localChats, serverChats: chats),
+    );
+
+    // Save the server-refreshed entries to local storage
+    for (final chat in chats) {
+      await _saveToLocal(merged[chat.id]!);
+    }
+
+    final now = DateTime.timestamp();
+    final fetchedIds = chats.map((chat) => chat.id).toSet();
+    final missing = computeRemovedChatIds(
+      requestedIds: chatIds,
+      localChats: localChats,
+      fetchedIds: fetchedIds,
+      now: now,
+    );
+    final deletedChatIds = await _brakeRemovals(
+      missing: missing,
+      localChats: localChats,
+      fetchedIds: fetchedIds,
+      fullFetch: chatIds == null,
+      now: now,
+    );
+
+    // Update state
+    final newState = Map<String, Chat>.from(merged);
+    for (final chatId in deletedChatIds) {
+      newState.remove(chatId);
+    }
+    final sorted = newState.values.toList()
+      ..sort(compareChatsForList);
+    state = sorted;
+
+    for (final chatId in deletedChatIds) {
+      logger.info(
+        'Chat $chatId no longer on server — removing locally',
+        tag: 'ChatsController',
+      );
+      await _removeChatLocally(chatId);
+    }
+
+    // The server answered, so this is the moment to confirm the names the
+    // start took from the device (CHAT-62). A no-op once they are, and never a
+    // reason for the refresh itself to fail.
+    try {
+      unawaited(ref.read(profilesControllerProvider.notifier).refreshStale());
+    } catch (e) {
+      logger.debug('Profile confirmation skipped: $e', tag: 'ChatsController');
+    }
+  }
+
+  /// Lets only those removals through that do not look like a server fault
+  /// (CHAT-32, see [planChatRemovals]); the rest stay until the grace is over.
+  Future<List<String>> _brakeRemovals({
+    required List<String> missing,
+    required Map<String, Chat> localChats,
+    required Set<String> fetchedIds,
+    required bool fullFetch,
+    required DateTime now,
+  }) async {
+    final store = ref.read(chatRemovalStoreProvider);
+    final records = await store.load();
+    if (missing.isEmpty && records.isEmpty) return const [];
+    final suspicious = looksLikeMassRemoval(
+      removed: missing.length,
+      established: countEstablishedChats(localChats, now),
+      fullFetch: fullFetch,
+      fetched: fetchedIds.length,
+    );
+    final plan = planChatRemovals(
+      candidates: missing,
+      presentIds: fetchedIds,
+      localIds: localChats.keys.toSet(),
+      records: records,
+      suspicious: suspicious,
+      now: now,
+    );
+    if (!mapEquals(plan.records, records)) await store.save(plan.records);
+    if (plan.hold.isNotEmpty) {
+      logger.warning(
+        'refreshChats: ${plan.hold.length} of ${localChats.length} local '
+        'chat(s) missing from the server at once (fetched ${fetchedIds.length}'
+        '${fullFetch ? '' : ', targeted'}) — looks like a server fault, '
+        'keeping them until the grace is over',
+        tag: 'ChatsController',
+      );
+    }
+    return plan.remove;
+  }
+
+  /// Local chats past the create grace, i.e. ones a fetch must return.
+  @visibleForTesting
+  static int countEstablishedChats(Map<String, Chat> localChats, DateTime now) {
+    final createGrace = now.subtract(_createGrace);
+    return localChats.values
+        .where((c) => c.insertedAt.isBefore(createGrace))
+        .length;
+  }
+
+  static const Duration _createGrace = Duration(minutes: 2);
+
+  /// Pure merge of a server chat fetch over the local snapshot — the single
+  /// source of truth for what `refreshChats` puts into state.
+  ///
+  /// Rules:
+  ///  • Every server-returned chat lands in the result — the SERVER wins for
+  ///    metadata (name, admins, TTL…); local-only chats are kept.
+  ///  • Preserve LOCAL state a refresh would otherwise clobber:
+  ///    – the pin flag (#3) — server data never carries it;
+  ///    – a newer local lastMessageAt from our OWN send — the server derives
+  ///      last_message_at from RECEIVED messages only, so right after we send
+  ///      it would regress and the chat drops down the list (00057 fixes the
+  ///      server side too; this is the belt-and-braces guard);
+  ///    – the read marker [Chat.lastReadAt], which is local-only by design.
+  ///  • The server's `unread_count` is DISCARDED. It is derived from
+  ///    `chat_members.last_read_at`, the record of when the user opened which
+  ///    chat that this feature exists to remove; [_withLocalUnread] recomputes
+  ///    the count from the local message store right after this merge. Until
+  ///    the server side is dropped it still arrives in the payload — carrying
+  ///    it into state would just reintroduce the flicker it used to cause.
+  @visibleForTesting
+  static Map<String, Chat> mergeServerChats({
+    required Map<String, Chat> localChats,
+    required List<Chat> serverChats,
+  }) {
+    final merged = Map<String, Chat>.from(localChats);
+    for (final c in serverChats) {
+      final local = localChats[c.id];
+      var m = c.copyWith(
+        lastReadAt: local?.lastReadAt,
+        unreadCount: local?.unreadCount ?? 0,
+      );
+      if (local?.isPinned ?? false) m = m.copyWith(isPinned: true);
+      final localTs = local?.lastMessageAt;
+      if (localTs != null &&
+          (m.lastMessageAt == null || localTs.isAfter(m.lastMessageAt!))) {
+        m = m.copyWith(lastMessageAt: localTs);
+      }
+      merged[c.id] = m;
+    }
+    return merged;
+  }
+
+  /// Recomputes every chat's unread count from the LOCAL message store.
+  ///
+  /// A chat counts incoming messages newer than its own [Chat.lastReadAt];
+  /// chats without one (upgraded installs, whose rows predate the direction
+  /// column) fall back to the unread epoch stamped by the v9→v10 schema
+  /// migration, so nothing that existed before the switch surfaces as unread.
+  Future<Map<String, Chat>> _withLocalUnread(Map<String, Chat> chats) async {
+    if (chats.isEmpty) return chats;
+    try {
+      final messages = ref.read(messagesLocalRepositoryProvider);
+      final counts = await messages.countUnread(
+        {for (final c in chats.values) c.id: c.lastReadAt},
+        fallback: await messages.getUnreadEpoch(),
+      );
+      return {
+        for (final e in chats.entries)
+          e.key: e.value.copyWith(unreadCount: counts[e.key] ?? 0),
+      };
+    } catch (e, stackTrace) {
+      // Keep whatever counts we had rather than zeroing the list on a DB hiccup.
+      logger.error(
+        'Failed to compute local unread counts',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return chats;
+    }
+  }
+
+  /// Reconcile deletions: get_user_chats_with_metadata inner-joins our own
+  /// chat_members row, so a chat missing from a successful fetch means it was
+  /// deleted OR we were removed — the same two cases the realtime chatDeleted
+  /// event covers. Without this, a missed event left the chat around forever.
+  /// Only chats the fetch could have returned are candidates (a targeted
+  /// refresh returns just the requested ids), and freshly inserted chats are
+  /// skipped: their membership row may not be visible to a fetch that was
+  /// already in flight when the chat was created.
+  @visibleForTesting
+  static List<String> computeRemovedChatIds({
+    required Iterable<String>? requestedIds,
+    required Map<String, Chat> localChats,
+    required Set<String> fetchedIds,
+    required DateTime now,
+  }) {
+    final candidateIds = requestedIds?.toSet() ?? localChats.keys.toSet();
+    final createGrace = now.subtract(_createGrace);
+    return candidateIds
+        .where((id) => !fetchedIds.contains(id))
+        .where((id) => localChats.containsKey(id))
+        .where((id) => localChats[id]!.insertedAt.isBefore(createGrace))
+        .toList();
+  }
+
+  /// Adds a new chat
+  Future<void> addChat(String id) async {
+    // This is the local, self-initiated entry (create / QR-add). Mark it so the
+    // "you were added" toast (#117) is suppressed for it — see [_handleNewChat].
+    _selfInitiatedChatIds.add(id);
+    return await _handleNewChat(NewChatEvent(chatId: id));
+  }
+
+  /// Opens the existing 1:1 with [peerId] — or sends a request.
+  ///
+  /// **Until 1.26 this created the chat directly.** That was exactly the hole:
+  /// whoever creates a chat is its admin, and the INSERT rule on `chat_members`
+  /// (00052) allows them to enter the second participant — unasked. It never
+  /// became visible because one cannot find strangers; in a shared group,
+  /// though, one has long known the other's id.
+  ///
+  /// The QR scan is **no exception** to this (decided 2026-08-24): the server
+  /// cannot check whether anything was really scanned, so an exception for it
+  /// would be an exception for anyone who claims to scan.
+  ///
+  /// [id] is null when a request went out — then there is nothing to open yet.
+  Future<({String? id, bool existed, bool requested})> findOrRequestDirectChat(
+    String peerId,
+  ) async {
+    if (userId == null) throw Exception('User not authenticated');
+    final existing = await repo.findDirectChat(peerId, userId!);
+    if (existing != null) {
+      // Make sure it's present locally / in state before we navigate to it.
+      if (!state.any((c) => c.id == existing)) {
+        await addChat(existing);
+      }
+      logger.info(
+        'Reusing existing direct chat $existing with $peerId',
+        tag: 'ChatsController',
+      );
+      return (id: existing, existed: true, requested: false);
+    }
+    await ref.read(chatRequestsRepositoryProvider).send(peerId);
+    return (id: null, existed: false, requested: true);
+  }
+
+  /// Create a new group chat with a name
+  Future<String> createGroupChat({required String name}) async {
+    if (userId == null) throw Exception('User not authenticated');
+
+    try {
+      // 1. Create chat with name (only current user as member initially)
+      final chat = await repo.createChat([userId!], name: name);
+
+      // 2. Generate key pair for this chat
+      await keyManager.generateKeyPairForChat(chat.id);
+      final myPublicKey = await keyManager.getPublicKey(chat.id);
+
+      if (myPublicKey == null) {
+        throw Exception('Failed to generate key pair');
+      }
+
+      // 3. Store own public key in chat_members (identity-signed, C1)
+      await memberKeysRepo.setPublicKey(
+        chatId: chat.id,
+        userId: userId!,
+        publicKeyPem: await _signMyKey(chat.id, myPublicKey),
+      );
+
+      // 4. Save to local storage
+      await _saveToLocal(chat);
+
+      // 5. Add to state
+      state = [...state, chat];
+
+      return chat.id;
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to create group chat',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Updates chat metadata (lastMessageAt and unreadCount).
+  ///
+  /// [bumpToTop] guarantees the chat floats to the very top of the list. Use it
+  /// for the sender's OWN sends: the sender stamps `lastMessageAt` from its
+  /// local device clock, while every other chat carries a timestamp minted by a
+  /// different device / the server. A slow local clock (or a media upload whose
+  /// timestamp was captured at upload-start) would otherwise leave the
+  /// just-sent chat stuck *below* a chat with a faster clock, even though we
+  /// re-sort. When set, the sort key is forced strictly above the current
+  /// maximum whenever the incoming timestamp isn't already the newest.
+  Future<void> updateChatMetadata({
+    required String chatId,
+    DateTime? lastMessageAt,
+    bool incrementUnread = false,
+    bool bumpToTop = false,
+  }) async {
+    try {
+      // Find the chat in state
+      final chatIndex = state.indexWhere((c) => c.id == chatId);
+      if (chatIndex == -1) {
+        logger.warning(
+          'Cannot update metadata: Chat $chatId not found in state',
+          tag: 'ChatsController',
+        );
+        return;
+      }
+
+      final chat = state[chatIndex];
+
+      final effectiveLastMessageAt = bumpToTop
+          ? bumpedSortTimestamp(
+              chats: state,
+              chatId: chatId,
+              lastMessageAt: lastMessageAt ?? chat.lastMessageAt,
+            )
+          : lastMessageAt ?? chat.lastMessageAt;
+
+      final updatedChat = chat.copyWith(
+        lastMessageAt: effectiveLastMessageAt,
+        unreadCount: incrementUnread ? chat.unreadCount + 1 : chat.unreadCount,
+      );
+
+      // Update in local storage
+      await _saveToLocal(updatedChat);
+
+      // Rebuild state by id — the index computed above may be stale after the
+      // `await` (a concurrent emission could have reordered/resized `state`).
+      final newState = [
+        for (final c in state) c.id == chatId ? updatedChat : c,
+      ]..sort(compareChatsForList);
+      state = newState;
+
+      logger.debug(
+        'Updated chat $chatId metadata: lastMessageAt=${effectiveLastMessageAt?.toIso8601String()}, unreadCount=${updatedChat.unreadCount}, bumpToTop=$bumpToTop',
+        tag: 'ChatsController',
+      );
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to update chat metadata',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// Toggles the local pin on a chat (#3): pinned chats sort to the very top of
+  /// the ChatList. Local-only — persists in the encrypted blob, never touches
+  /// the server (see [compareChatsForList] + the refresh-merge pin preservation).
+  Future<void> togglePin(String chatId) async {
+    final idx = state.indexWhere((c) => c.id == chatId);
+    if (idx == -1) return;
+    final updated = state[idx].copyWith(isPinned: !state[idx].isPinned);
+    await _saveToLocal(updated);
+    final newState = [
+      for (final c in state) c.id == chatId ? updated : c,
+    ]..sort(compareChatsForList);
+    state = newState;
+  }
+
+  /// Where to put the read marker when [chat] is opened — see [readMarkerFor]
+  /// for why "now" was the wrong answer.
+  Future<DateTime?> _readMarkerFor(Chat chat) async {
+    DateTime? newest;
+    try {
+      newest = await ref
+          .read(messagesLocalRepositoryProvider)
+          .latestMessageCreatedAt(chat.id);
+    } catch (e) {
+      logger.warning(
+        'Could not read the newest message of ${chat.id} for the read marker',
+        tag: 'ChatsController',
+        error: e,
+      );
+    }
+    return readMarkerFor(current: chat.lastReadAt, newestLocal: newest);
+  }
+
+  /// Resets the unread count for a chat (called when chat is opened/viewed)
+  Future<void> resetUnreadCount(String chatId) async {
+    // The read marker is now LOCAL: stamping `lastReadAt` is what makes the
+    // count stay at zero across restarts, because that is what the recount in
+    // [_withLocalUnread] measures against. No round-trip, so there is no window
+    // in which a refresh could resurrect the badge mid-read — the guard that
+    // used to cover that window (`_pendingReadZero`) is gone with it.
+    //
+    // The server RPC still runs, but only to keep `aps.badge` sane: iOS gets
+    // its badge from the push while the app is backgrounded, and the Edge
+    // Function still derives that number from `chat_members.last_read_at`. Once
+    // the badge is set by the notification extension itself, this call and the
+    // column go together. Fire-and-forget — a failure costs a stale iOS badge,
+    // never the chat opening.
+    unawaited(
+      repo.markChatRead(chatId).catchError((Object e, StackTrace s) {
+        logger.warning('markChatRead failed for $chatId: $e',
+            tag: 'ChatsController');
+      }),
+    );
+    try {
+      final chat = _stateMap[chatId];
+      if (chat == null) return;
+      final marker = await _readMarkerFor(chat);
+
+      // Read the chat again after the await and patch only the two fields this
+      // method owns. The list may have moved meanwhile: leaving a chat right
+      // after a call bumps it to the top (call log) while this runs. Writing
+      // back to the index computed before the await then put this chat in the
+      // slot of the one that had moved down — the list showed the same chat
+      // twice and the other one not at all (2026-10-12, SeB twice, Yogi gone).
+      Chat read(Chat c) => c.copyWith(unreadCount: 0, lastReadAt: marker);
+      final current = _stateMap[chatId];
+      if (current == null) return;
+
+      // ALWAYS re-zero local storage — the old early-return on an already-zero
+      // STATE skipped this, leaving a stale non-zero count in the DB that the
+      // next refresh happily restored (half of the 118↔0 flicker).
+      await _saveToLocal(read(current));
+
+      // And always update state, even at an already-zero count: the read marker
+      // moved, and state is what the next recount reads it from. Skipping the
+      // write here would leave an in-memory chat stamped with an older
+      // `lastReadAt` than the one just persisted. By id, for the same reason
+      // as above.
+      state = patchChatById(state, chatId, read);
+
+      logger.debug(
+        'Reset unread count for chat $chatId',
+        tag: 'ChatsController',
+      );
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to reset unread count',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// Updates the name of a chat
+  Future<void> updateChatName({required Chat chat, required String newName}) async {
+    if (userId == null) throw Exception('User not authenticated');
+    newName = newName.trim();
+    // Use the CURRENT chat from state, not the (possibly stale) snapshot passed
+    // in: a second consecutive edit otherwise compares against — and rebuilds
+    // from — an outdated snapshot, so it silently no-ops until the screen is
+    // reopened with fresh data.
+    final current = state.firstWhere((c) => c.id == chat.id, orElse: () => chat);
+    if (newName.isEmpty || current.name == newName || newName.length < 2) return;
+    try {
+      await repo.updateChatName(current.id, newName);
+      final updated = current.copyWith(name: newName);
+      await localRepo.saveChat(updated);
+      state = state.map((c) => c.id == updated.id ? updated : c).toList();
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to update chat name',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// Update the chat description / topic (admin only). An empty string clears
+  /// it (stored as null).
+  Future<void> updateChatDescription({
+    required Chat chat,
+    required String newDescription,
+  }) async {
+    if (userId == null) throw Exception('User not authenticated');
+    final trimmed = newDescription.trim();
+    final value = trimmed.isEmpty ? null : trimmed;
+    // Current chat from state (not the stale snapshot) — same repeated-edit
+    // no-op fix as updateChatName.
+    final current = state.firstWhere((c) => c.id == chat.id, orElse: () => chat);
+    if (current.description == value) return;
+    try {
+      await repo.updateChatDescription(current.id, value);
+      final updated = current.copyWith(
+        description: value,
+        clearDescription: value == null,
+      );
+      await localRepo.saveChat(updated);
+      state = state.map((c) => c.id == updated.id ? updated : c).toList();
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to update chat description',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// Upload (or replace) a group's avatar (admin only, 00055). Uploads the
+  /// bytes to the public `group-avatars` bucket and persists the object path on
+  /// the chat. Returns the stored path, or null on failure.
+  Future<String?> uploadGroupAvatar({
+    required Chat chat,
+    required Uint8List bytes,
+    required String fileExtension,
+    String contentType = 'image/jpeg',
+  }) async {
+    if (userId == null) throw Exception('User not authenticated');
+    try {
+      final path = await repo.uploadGroupAvatar(
+        chatId: chat.id,
+        bytes: bytes,
+        fileExtension: fileExtension,
+        contentType: contentType,
+      );
+      // Bump updatedAt so the cache-buster (?u=updatedAt) changes and the
+      // uploader immediately sees the new picture instead of the cached one
+      // (the object path is stable/upsert). The server trigger bumps it too.
+      final updated =
+          chat.copyWith(avatarPath: path, updatedAt: DateTime.now());
+      await localRepo.saveChat(updated);
+      state = state.map((c) => c.id == chat.id ? updated : c).toList();
+      return path;
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to upload group avatar',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  /// Remove a group's avatar (admin only): clears the path back to the initials
+  /// fallback.
+  Future<void> clearGroupAvatar({required Chat chat}) async {
+    if (userId == null) throw Exception('User not authenticated');
+    if (chat.avatarPath == null) return;
+    try {
+      await repo.clearGroupAvatar(chat.id);
+      final updated = chat.copyWith(clearAvatar: true);
+      await localRepo.saveChat(updated);
+      state = state.map((c) => c.id == chat.id ? updated : c).toList();
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to clear group avatar',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// Set this chat's disappearing-messages TTL (seconds; null disables it).
+  Future<void> updateMessageTtl({
+    required Chat chat,
+    required int? ttlSeconds,
+  }) async {
+    if (userId == null) throw Exception('User not authenticated');
+    try {
+      await repo.updateMessageTtl(chat.id, ttlSeconds);
+      final updated = ttlSeconds == null
+          ? chat.copyWith(clearMessageTtl: true)
+          : chat.copyWith(messageTtlSeconds: ttlSeconds);
+      await localRepo.saveChat(updated);
+      state = state.map((c) => c.id == chat.id ? updated : c).toList();
+      logger.info(
+        '⏳ Set message TTL for chat ${chat.id} to ${ttlSeconds ?? 'off'}',
+        tag: 'ChatsController',
+      );
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to update message TTL',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Deletes a chat
+  Future<bool> deleteChat(String chatId, {bool localOnly = false}) async {
+    try {
+      if (!localOnly) {
+        final deleted = await repo.deleteChat(chatId);
+        if (!deleted) {
+          // RLS filtered the delete to zero rows (not an admin). Keep the
+          // local copy — deleting it anyway would just have refreshChats
+          // resurrect the chat from the server on the next sync.
+          logger.warning(
+            'Server did not delete chat $chatId (no permission?)',
+            tag: 'ChatsController',
+          );
+          return false;
+        }
+      }
+      await _removeChatLocally(chatId);
+      // Delete key pair
+      await keyManager.deleteKeyPair(chatId);
+      ref.read(messagesControllerProvider(chatId).notifier).deleteMessagesForChat(chatId);
+      // Drop any iOS Share-Suggestions donation for this conversation.
+      await ShareSuggestionsChannel.deleteConversations([chatId]);
+      return true;
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to delete chat',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  }
+
+  /// Ensure our own per-chat hybrid key pair exists locally AND that the
+  /// matching public key is registered in `chat_members`. Idempotent and
+  /// safe to call on every refresh: it only writes when the server copy is
+  /// missing or stale (e.g. a legacy RSA key from before the PQC migration).
+  /// Ensure a long-term identity key exists on this device (generate on first
+  /// run). Local + fast; peers rely on it to verify our per-chat keys.
+  Future<void> _ensureIdentityKey() async {
+    try {
+      await ref.read(identityKeyManagerProvider).ensureKeyPair();
+    } catch (e, stackTrace) {
+      logger.error('Failed to ensure identity key',
+          tag: 'ChatsController', error: e, stackTrace: stackTrace);
+    }
+  }
+
+  /// Publish our identity public key to `profiles.identity_public_key` so
+  /// co-members can pin it (TOFU) and verify our keys/signatures. Idempotent —
+  /// only writes when the server copy differs, to avoid needless broadcasts.
+  Future<void> _publishIdentityKey() async {
+    if (userId == null) return;
+    try {
+      if (await _isSuperseded()) return;
+      final identity = ref.read(identityKeyManagerProvider);
+      final pub = await identity.publicKeyBase64();
+      if (pub == null) return;
+      final existing = await ref
+          .read(profilesControllerProvider.notifier)
+          .getProfile(userId!);
+      if (existing.identityPublicKey == pub) return;
+      await ProfilesRepository(ref.read(supabaseClientProvider))
+          .publishIdentityKey(userId: userId!, identityPublicKey: pub);
+      await identity.markPublished(pub);
+      ref.invalidate(installationStatusProvider(userId!));
+    } catch (e, stackTrace) {
+      logger.error('Failed to publish identity key',
+          tag: 'ChatsController', error: e, stackTrace: stackTrace);
+    }
+  }
+
+  /// Attach an identity-key signature to our per-chat public-key blob, bound to
+  /// [chatId], so peers can verify the server didn't swap the key (audit C1).
+  /// Deterministic (Ed25519/RFC 8032), so re-signing the same key is idempotent.
+  /// Falls back to the unsigned blob if signing fails — peers then see the key
+  /// as "unverified" rather than the registration failing.
+  Future<String> _signMyKey(String chatId, String publicBlob) =>
+      ref.read(kemKeySignerProvider).sign(chatId, publicBlob);
+
+  /// True when the account now lives on another installation (recovered
+  /// there). Such a device must not write keys: it would overwrite the new
+  /// device's keys on every start, and the new device would write back.
+  Future<bool> _isSuperseded() async =>
+      userId != null &&
+      await ref.read(installationStatusProvider(userId!).future) ==
+          InstallationStatus.superseded;
+
+  /// Registrations in flight, by chat. A new chat reaches this from several
+  /// paths at once; they share one run (see generateKeyPairForChat for what
+  /// happened without).
+  final Map<String, Future<void>> _keyRegistrations = {};
+
+  Future<void> _ensureMyKeyRegistered(String chatId) =>
+      // Block body: an arrow returning the removed future (this one) would
+      // make whenComplete wait for itself.
+      _keyRegistrations[chatId] ??= _registerMyKey(chatId).whenComplete(() {
+        _keyRegistrations.remove(chatId);
+      });
+
+  Future<void> _registerMyKey(String chatId) async {
+    if (userId == null) return;
+    if (await _isSuperseded()) return;
+    try {
+      // Fetch our currently-registered server key first — it is both the
+      // re-mint guard below and the "did anything change?" comparison later.
+      final registered = await memberKeysRepo.getPublicKey(
+        chatId: chatId,
+        userId: userId!,
+      );
+
+      if (!(await keyManager.hasKeyPair(chatId))) {
+        // Local KEM key is gone. Distinguish a genuinely NEW chat (nothing
+        // registered server-side yet) from a LOST key — secure storage got
+        // wiped but we already registered a key (the Galaxy resetOnError
+        // deleteAll class, #149). Regenerating over a loss would overwrite our
+        // server key with a fresh one that can't decrypt in-flight ciphertext
+        // AND fire a false `keys_rotated` alarm to every peer. So mint only for
+        // a truly-new chat; a lost key defers (restore via recovery phrase).
+        if (registered != null) {
+          // Chat keys live only in local secure storage — the recovery phrase
+          // re-establishes IDENTITY, not per-chat KEM keys. So we can't silently
+          // recover; flag the chat so the chat view offers a deliberate rotate.
+          logger.warning(
+            'KEM key for chat $chatId missing locally but present on server — '
+            'deferring (no re-mint / no keys_rotated). User must rotate a new '
+            'key to resume decryptable messaging.',
+            tag: 'ChatsController',
+          );
+          ref.read(lostKeysProvider.notifier).markLost(chatId);
+          return;
+        }
+        await keyManager.generateKeyPairForChat(chatId);
+      }
+      final myPublicKey = await keyManager.getPublicKey(chatId);
+      if (myPublicKey == null) return;
+      final signed = await _signMyKey(chatId, myPublicKey);
+
+      if (registered != signed) {
+        await memberKeysRepo.setPublicKey(
+          chatId: chatId,
+          userId: userId!,
+          publicKeyPem: signed,
+        );
+      }
+
+      // Forward secrecy (P3): keep a pool of one-time prekeys published so peers
+      // can send us v5 (per-message forward-secret) envelopes. Fire-and-forget —
+      // topping the pool up means up to ~20 hybrid keygens + a publish, which
+      // must NOT block chat open. The manager is captured synchronously (alive
+      // ref) and owns its repos, so it survives if this controller disposes;
+      // replenishIfLow swallows its own errors, and senders fall back to v4
+      // while our pool is empty. So this never blocks or breaks key registration.
+      unawaited(ref.read(prekeyManagerProvider).replenishIfLow(chatId, userId!));
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to ensure key registration for chat $chatId',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// Rotate our per-chat key pair and register the new public key. New
+  /// messages will be encrypted for the fresh key; the previous key is
+  /// retained (one generation) so in-flight messages still decrypt. Old
+  /// locally-stored messages are unaffected.
+  Future<void> rotateChatKey(String chatId) async {
+    if (userId == null) return;
+    try {
+      final newPublicKey = await keyManager.rotateKeyPairForChat(chatId);
+      if (newPublicKey == null) return;
+      await memberKeysRepo.setPublicKey(
+        chatId: chatId,
+        userId: userId!,
+        publicKeyPem: await _signMyKey(chatId, newPublicKey),
+      );
+      // A deliberate rotate clears the lost-key state (#11): we now have a fresh
+      // local private key registered, so messaging is decryptable again.
+      ref.read(lostKeysProvider.notifier).clear(chatId);
+      logger.info('Rotated key pair for chat $chatId', tag: 'ChatsController');
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to rotate key for chat $chatId',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// Handle new chat event from event bus
+  Future<void> _handleNewChat(NewChatEvent event) async {
+    if (userId == null) return;
+    try {
+      // 1. Our key for this chat, through the one shared registration: it
+      // mints only for a genuinely new chat (a lost key is flagged, #149) and
+      // never twice at once. This path used to mint and publish on its own,
+      // in parallel with the others a new chat sets off.
+      await _ensureMyKeyRegistered(event.chatId);
+      if (!(await keyManager.hasKeyPair(event.chatId))) return;
+
+      // 2. Fetch current chat
+      final chat = await repo.getChatById(event.chatId);
+      if (chat == null) return;
+
+      // 3. Save to local storage
+      await _saveToLocal(chat);
+
+      // 4. Add to state if not already present
+      if (state.any((c) => c.id == chat.id)) {
+        state = state.map((c) => c.id == chat.id ? chat : c).toList();
+      } else {
+        state = [...state, chat];
+      }
+
+      // 5. Eagerly resolve member profiles so a 1:1's title shows the peer's
+      // username immediately. The lazy profilesListProvider load can race a
+      // freshly-created chat and negative-cache a member in
+      // ProfilesController._nonExistingIds (a transient null fetch). Because the
+      // retry check there keys on containsKey while loadProfiles skips
+      // isProfileCached, such a member is then NEVER retried — leaving the chat
+      // titled "Chat <id>" until an app restart. forceRefresh busts that cache;
+      // invalidate re-fetches the member list in case it cached empty/partial.
+      try {
+        final memberIds =
+            await ref.read(chatMembersRepositoryProvider).getChatMembers(chat.id);
+        await ref
+            .read(profilesControllerProvider.notifier)
+            .loadProfiles(memberIds, forceRefresh: true);
+        ref.invalidate(chatMembersProvider(chat.id));
+
+        // 6. #117: if SOMEONE ELSE added me to this chat (i.e. it wasn't one I
+        // initiated via addChat), raise a "you were added" toast with a "go to
+        // chat" action. memberIds + profiles are freshly loaded here.
+        if (!_selfInitiatedChatIds.contains(event.chatId)) {
+          final String message;
+          if (chat.isGroup) {
+            message = 'chats.added_to_group'.tr(
+              namedArgs: {'group': chat.name ?? 'chats.a_group'.tr()},
+            );
+          } else {
+            final profiles = ref.read(profilesControllerProvider);
+            final peerId = memberIds.firstWhere(
+              (id) => id != userId,
+              orElse: () => '',
+            );
+            final peerName = profiles[peerId]?.username ?? 'chats.someone'.tr();
+            message = 'chats.added_you'.tr(namedArgs: {'name': peerName});
+          }
+          ref.read(newChatToastProvider.notifier).state =
+              NewChatToast(chatId: chat.id, message: message);
+        }
+
+        // 7. Push-Render-Cache: the background isolate resolves ids only from
+        // names written by the foreground app, and that used to happen on the
+        // chat-list screen alone. A group created or joined right before its
+        // first message therefore arrived titled "Chattr". Members and profiles
+        // are freshly loaded above, so the name resolves here.
+        await cacheChatNameForPush(ref, chat.id);
+      } catch (e) {
+        logger.warning(
+          'Eager member-profile load for new chat ${chat.id} failed',
+          tag: 'ChatsController',
+          error: e,
+        );
+      }
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to handle new chat event',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+
+    // A just-approved user receives ONLY `newChat` — the server's
+    // `membershipChanged` broadcast deliberately excludes the changed user, so
+    // this is the sole place their "Warte auf Admin-Freigabe" banner can clear.
+    // Re-fetch the membership providers the banner watches so isMember flips to
+    // true and isPending to false (they are autoDispose FutureProviders that
+    // only re-evaluate on invalidation), and drop the resolved outgoing request.
+    final uid = userId;
+    if (uid != null) {
+      ref.invalidate(isMemberProvider((chatId: event.chatId, userId: uid)));
+      ref.invalidate(
+        isPendingMemberProvider((chatId: event.chatId, userId: uid)),
+      );
+      ref.invalidate(
+        membershipStatusProvider((chatId: event.chatId, userId: uid)),
+      );
+      ref.invalidate(myPendingRequestsProvider(uid));
+    }
+  }
+
+  /// Handle pending member event from event bus
+  void _handlePendingMember(PendingMemberEvent event) {
+    // Invalidate the pending members provider to refresh the UI
+    ref.invalidate(pendingMembersProvider(event.chatId));
+
+    logger.info(
+      'Pending member request for chat ${event.chatId} from user ${event.userId}',
+      tag: 'ChatsController',
+    );
+  }
+
+  /// Handle membership changed event (when member list changes for existing members)
+  void _handleMembershipChanged(MembershipChangedEvent event) {
+    // Invalidate the chat members provider to refresh member lists
+    ref.invalidate(chatMembersProvider(event.chatId));
+
+    // Invalidate membership status for the affected user
+    ref.invalidate(
+      membershipStatusProvider((chatId: event.chatId, userId: event.userId)),
+    );
+
+    // A membership change means a pending request was resolved (approval turns a
+    // pending row into a member). The `pendingMember` broadcast only fires on
+    // NEW requests, never on resolution — so without this, a CO-admin's pending
+    // list + badge keep showing an already-approved request until manual
+    // refresh (the aggregated-view discrepancy, Task #102). Re-fetch the queue.
+    ref.invalidate(pendingMembersProvider(event.chatId));
+
+    // If it's our own membership status that changed, invalidate it specifically
+    if (event.userId == userId) {
+      ref.invalidate(
+        membershipStatusProvider((chatId: event.chatId, userId: userId!)),
+      );
+      // Our own request just resolved (we were approved / added) → drop it from
+      // the outgoing "my requests" overview.
+      ref.invalidate(myPendingRequestsProvider(userId!));
+    }
+
+    // Forward secrecy: when ANOTHER member leaves/is removed, rotate our own
+    // key so subsequent messages use a fresh key the departed member never had.
+    if (event.action == 'left' && event.userId != userId) {
+      rotateChatKey(event.chatId);
+    }
+
+    logger.info(
+      'Membership changed for chat ${event.chatId}: ${event.action} user ${event.userId}',
+      tag: 'ChatsController',
+    );
+  }
+
+  /// Handle chat deleted event (when user is removed from a chat)
+  Future<void> _handleChatDeleted(ChatDeletedEvent event) async {
+    try {
+      await _removeChatLocally(event.chatId);
+
+      logger.info(
+        'Chat ${event.chatId} deleted (user removed from chat)',
+        tag: 'ChatsController',
+      );
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to handle chat deleted event',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// Removes a chat from the local database, in-memory state, and dependent
+  /// providers — shared by explicit deletion, the realtime chatDeleted event,
+  /// and the refresh reconciliation.
+  Future<void> _removeChatLocally(String chatId) async {
+    // Removes the chat + its cached messages from the local database.
+    await localRepo.markChatAsDeleted(chatId);
+    ref.read(chatMembersCacheProvider).forget(chatId);
+
+    // Drop any unsent composer draft for the chat.
+    await ref.read(draftsRepositoryProvider).deleteDraft(chatId);
+
+    // Remove it from in-memory state so the UI updates immediately (the state
+    // setter keeps _stateMap in sync).
+    state = state.where((c) => c.id != chatId).toList();
+
+    // Invalidate the chat members provider to refresh member lists
+    ref.read(chatMembersControllerProvider).invalidateProviders(chatId, userId);
+  }
+
+
+  /// Save chat to local storage
+  Future<void> _saveToLocal(Chat chat) async {
+    try {
+      await localRepo.saveChat(chat);
+    } catch (e, stackTrace) {
+      logger.error(
+        'Failed to save chat to local storage',
+        tag: 'ChatsController',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+}

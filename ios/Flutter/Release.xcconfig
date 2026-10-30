@@ -1,0 +1,5 @@
+#include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
+#include "Generated.xcconfig"
+
+// Apple Developer Team (GERALD HOFBAUER) for automatic signing on device.
+DEVELOPMENT_TEAM = ND9MT2PP6B

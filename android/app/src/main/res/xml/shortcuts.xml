@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+  SPDX-License-Identifier: AGPL-3.0-or-later
+
+  QuickShare — declares Chattr chats as share targets, so recent conversations
+  can appear in the Direct Share row at the top of the system share sheet.
+
+  This file holds NO shortcuts. The conversations themselves are published at
+  runtime by ShareSuggestionsChannel.kt as long-lived dynamic shortcuts; what a
+  <share-target> does is tell the system which of those shortcuts may be offered
+  as a share destination, and for which content.
+
+  The <category> below is the join: it must match SHARE_TARGET_CATEGORY in
+  ShareSuggestionsChannel.kt exactly. A mismatch fails silently — the shortcuts
+  exist, the row simply stays empty.
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Mirrors MainActivity's ACTION_SEND intent filter in AndroidManifest.xml;
+         keep the mime types in sync with it, or a type will be shareable to the
+         app but not to a person. -->
+    <share-target android:targetClass="net.geraldhofbauer.chattr.MainActivity">
+        <data android:mimeType="text/plain"/>
+        <data android:mimeType="image/*"/>
+        <data android:mimeType="video/*"/>
+        <data android:mimeType="audio/*"/>
+        <data android:mimeType="application/*"/>
+        <category android:name="net.geraldhofbauer.chattr.dynamic_share_target"/>
+    </share-target>
+</shortcuts>

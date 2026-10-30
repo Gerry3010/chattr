@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "build",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": false,
+    "sourceMap": true
+  },
+  // Includes web_crypto/src/crypto/*.ts by relative import (true 1:1 reuse, not
+  // a copy — see src/crypto_port.ts). tsc computes the common root across both
+  // trees (the chattr repo root) and mirrors it under build/, so the emitted
+  // relative imports keep resolving correctly at runtime.
+  "include": ["src/**/*.ts", "test/**/*.ts", "../web_crypto/src/crypto/**/*.ts"]
+}

@@ -1,0 +1,31 @@
+# coturn — STUN/TURN for calls (stage 2). Lives in /opt/chattr-turn on the
+# Netcup box, next to (not inside) the Supabase stack: it shares nothing with
+# it but the secret, which reaches Postgres through Vault (00086).
+#
+# Host networking because a relay hands out ports from a range; publishing
+# 200 UDP ports through docker-proxy is slow and fragile. The firewall (ufw)
+# is what limits it — see open-firewall.sh.
+services:
+  coturn:
+    # Pinned by digest (CHAT-46): the floating 4.7 tag had not been rebuilt
+    # since 2025-12 and missed the mapped-address fix. Bump tag AND digest
+    # together, after the relay loopback test.
+    image: coturn/coturn:4.18.0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
+    network_mode: host
+    restart: unless-stopped
+    # The config holds the shared secret and is 0600 for gerry; run as gerry
+    # so it can be read without widening its mode.
+    user: "1001:1001"
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    read_only: true
+    tmpfs:
+      - /var/lib/coturn
+      - /tmp
+    # No logs, on purpose. coturn logs every allocation with both IP
+    # addresses — a list of who called when, on the very box that promises
+    # not to keep one. To debug, switch to `json-file` for the session and
+    # back afterwards.
+    logging:
+      driver: none

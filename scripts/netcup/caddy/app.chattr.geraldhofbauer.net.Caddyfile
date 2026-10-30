@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Old web app host: redirects to app.chattr.at since 2026-10-11.
+# Mirror of the live block in /etc/caddy/Caddyfile.
+#
+# FALLE: A plain redirect would strand every installed copy of the old app. A
+# browser never follows a redirect for a service-worker script, so the update
+# check fails and the old worker keeps serving the cached app forever. Under the
+# two worker URLs (Flutter + Firebase messaging) a worker is served that
+# unregisters itself and reloads its pages; only that reload reaches the 301.
+# The respond body must not contain `{`/`}` (Caddy placeholders) or `"`.
+app.chattr.geraldhofbauer.net {
+	@sw path /flutter_service_worker.js /firebase-messaging-sw.js
+	handle @sw {
+		header Content-Type "text/javascript; charset=utf-8"
+		header Cache-Control "no-store"
+		respond "self.addEventListener('install', () => self.skipWaiting()); self.addEventListener('activate', e => e.waitUntil(self.registration.unregister().then(() => self.clients.matchAll()).then(cs => cs.forEach(c => c.navigate(c.url)))));" 200
+	}
+	handle {
+		redir https://app.chattr.at{uri} 301
+	}
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+}

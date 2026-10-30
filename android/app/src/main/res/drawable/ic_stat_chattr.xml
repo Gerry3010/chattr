@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2025-2026 Gerald Hofbauer <info@geraldhofbauer.net> -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!--
+  Status-bar notification icon.
+
+  Android draws notification icons as a MASK: every non-transparent pixel is
+  painted in the system tint, colour and detail are discarded. The launcher
+  icon is therefore the wrong asset for this — it would render as a solid white
+  blob. This is the Chattr speech bubble from assets/icon/foreground.svg as a
+  flat silhouette, centred in the 1024 viewport (the mark's own bounds are
+  751x629, which leaves the padding a status-bar icon needs).
+
+  It also has to live in `drawable/`, not `mipmap/`: flutter_local_notifications
+  resolves the name with getIdentifier(name, "drawable", package) — one lookup,
+  drawable only, and the string is taken verbatim. That is why the previous
+  value '@mipmap/ic_launcher' failed twice over and left Android with no local
+  notifications at all.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+  <group
+      android:translateX="142.7"
+      android:translateY="197.6">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M100.258 284.951C100.258 127.577 244.514 0 422.464 0C600.414 0 744.669 127.577 744.669 284.951C744.669 442.325 600.414 569.899 422.464 569.899C417.877 569.899 413.313 569.815 408.772 569.647L173.209 569.647C154.747 597.81 70.7432 616.354 20.413 625.147C-0.753725 628.845 -6.09848 618.37 7.38996 601.644C29.8764 573.76 59.1379 532.11 59.1379 504.186L100.258 285.478C100.258 285.302 100.258 285.127 100.258 284.951L100.258 284.951Z" />
+  </group>
+</vector>
