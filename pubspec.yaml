@@ -94,7 +94,7 @@ dependencies:
   flutter_webrtc: ^1.6.2+hotfix.3
 
   # JetBrains Mono for the terminal/Matrix theme
-  google_fonts: ^8.1.0
+  google_fonts: ^9.0.0
 
   # SVG theme wallpapers (chat background)
   flutter_svg: ^2.0.10+1
