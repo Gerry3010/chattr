@@ -135,7 +135,7 @@ dependencies:
   # installer (ships its own FileProvider). Native Android/iOS only — the web
   # build never imports it (guarded behind apk_installer.dart's conditional
   # export). See lib/core/updates/android_update_service.dart.
-  open_filex: ^4.5.0
+  open_filex: ^5.0.0
 
 
   # Full emoji picker for custom message reactions (the "+" in the reaction
