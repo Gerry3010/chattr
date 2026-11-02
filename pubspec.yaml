@@ -194,7 +194,7 @@ dependencies:
   intl: ^0.20.2 # used directly by core/utils/app_time.dart (DateFormat)
 
   # Push Notifications
-  firebase_core: ^4.3.0
+  firebase_core: ^4.15.2
   firebase_messaging: ^16.1.0
   flutter_local_notifications: ^22.0.1
   # Used directly by the push renderer in the background isolate: that is the
