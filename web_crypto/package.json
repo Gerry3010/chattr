@@ -10,9 +10,9 @@
   },
   "dependencies": {
     "@noble/curves": "^1.8.1",
-    "mlkem": "^2.7.0"
+    "mlkem": "^2.7.1"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.28.2"
   }
 }
